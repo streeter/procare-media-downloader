@@ -30,10 +30,10 @@ THROTTLE=2
 JITTER=2
 
 # Date range
-START_YEAR=2023
-START_MONTH=2
+START_YEAR=2022
+START_MONTH=5
 END_YEAR=2026
-END_MONTH=2
+END_MONTH=8
 
 # Initialize counters
 EXPECTED_PHOTO_COUNT=0
@@ -95,7 +95,6 @@ echo ""
 
 CURRENT_YEAR=$START_YEAR
 CURRENT_MONTH=$START_MONTH
-CONSECUTIVE_EMPTY_MONTHS=0
 
 while true; do
     # Check if we've passed the end date
@@ -130,15 +129,13 @@ while true; do
         FILE_INDEX=$((FILE_INDEX + 1))
         CURRENT_PAGE_FILE="${TEMP_DIR}/page_$(printf "%05d" $FILE_INDEX).json"
 
-        fetch_page "$URL" "$CURRENT_PAGE_FILE"
-        TOTAL_API_CALLS=$((TOTAL_API_CALLS + 1))
-
         # Check curl exit code
-        if [ $? -ne 0 ]; then
+        if ! fetch_page "$URL" "$CURRENT_PAGE_FILE"; then
             echo "  Error: Curl command failed for page $PAGE."
             rm -f "$CURRENT_PAGE_FILE"
             break
         fi
+        TOTAL_API_CALLS=$((TOTAL_API_CALLS + 1))
 
         # Validate JSON response
         if ! jq -e . "$CURRENT_PAGE_FILE" >/dev/null 2>&1; then
@@ -173,17 +170,6 @@ while true; do
     EXPECTED_PHOTO_COUNT=$((EXPECTED_PHOTO_COUNT + MONTH_EXPECTED_COUNT))
     echo "  Month ${CURRENT_YEAR}-${MONTH_PADDED} complete: $MONTH_PHOTO_COUNT / $MONTH_EXPECTED_COUNT photos"
     echo ""
-
-    # Track consecutive empty months
-    if [ "$MONTH_PHOTO_COUNT" -eq 0 ]; then
-        CONSECUTIVE_EMPTY_MONTHS=$((CONSECUTIVE_EMPTY_MONTHS + 1))
-        if [ "$CONSECUTIVE_EMPTY_MONTHS" -ge 3 ]; then
-            echo "3 consecutive months with no photos. Stopping."
-            break
-        fi
-    else
-        CONSECUTIVE_EMPTY_MONTHS=0
-    fi
 
     # Advance to next month
     CURRENT_MONTH=$((CURRENT_MONTH + 1))

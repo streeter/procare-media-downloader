@@ -34,7 +34,7 @@ echo -n "your_token_here" > credentials.txt
 ./list_videos.sh
 ```
 
-This fetches all videos from the API and saves them to `raw_video_list_response.json`.
+This iterates through each month in the configured date range, fetching all videos and saving them to `raw_video_list_response.json`.
 
 The date range is configured at the top of the script:
 ```bash
@@ -87,9 +87,6 @@ START_MONTH=2
 END_YEAR=2026
 END_MONTH=2
 ```
-
-> [!NOTE]
-> The script automatically stops after 3 consecutive months with no photos.
 
 #### Step 2: Download Photos
 
