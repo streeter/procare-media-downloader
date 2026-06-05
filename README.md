@@ -50,7 +50,7 @@ END_MONTH=2
 ./download_videos.sh
 ```
 
-Videos are saved to `videos/<video-id>.mp4`.
+Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 
 **Options:**
 
@@ -94,7 +94,7 @@ END_MONTH=2
 	./download_photos.sh
 	```
 
-	Photos are saved to the `photos/` directory. Filenames are determined by the server's Content-Disposition header.
+	Photos are saved to `photos/YYYY-MM-DD HHMM <photo-id>.<ext>`.
 
 	**Options:**
 
@@ -119,7 +119,7 @@ END_MONTH=2
 	Both download scripts support resuming interrupted downloads:
 
 	- **Videos**: Skips files that already exist in `videos/`
-	- **Photos**: Tracks downloaded IDs in `photos/.downloaded_ids`
+	- **Photos**: Skips files that already exist in `photos/`
 
 	If a download is interrupted, run the script again to continue where you left off.
 
@@ -137,6 +137,8 @@ END_MONTH=2
 	- Authentication tokens expire periodically. If you receive authentication errors, obtain a new token.
 	- Throttling is built-in to avoid overwhelming the server. The default is 2-4 seconds between requests.
 	- The date range for both video and photo retrieval is configured via variables at the top of the respective list scripts.
+	- Downloaded filenames use each item's `created_at` value so files sort chronologically by name.
+	- On macOS, download scripts set file creation time with `SetFile` when available and always try to set modified time with `touch`.
 	- Some photos might be missing the .jpg file extension
 	- Some media may be listed but ultimately fail to download because they have already been deleted from the backend. The file will be saved with the response
 

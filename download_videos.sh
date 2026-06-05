@@ -12,7 +12,7 @@
 #   - curl: Required for downloads
 #
 # Output:
-#   - videos/<id>.mp4: Downloaded video files
+#   - videos/YYYY-MM-DD HHMM <id>.<ext>: Downloaded video files
 #
 # Options:
 #   -n <limit>    Number of videos to download (0 = all, default: 0)
@@ -79,10 +79,80 @@ mkdir -p videos
 
 # Use mktemp for safer temp file creation
 TEMP_FILE=$(mktemp)
-trap 'rm -f "$TEMP_FILE"' EXIT
+TEMP_DIR=$(mktemp -d)
+trap 'rm -f "$TEMP_FILE"; rm -rf "$TEMP_DIR"' EXIT
 
-# Extract ID and URL
-if ! jq -r '.videos[] | "\(.id) \(.video_file_url)"' "$INPUT_FILE" > "$TEMP_FILE"; then
+sanitize_component() {
+    printf '%s' "$1" | tr -c '[:alnum:]_.-' '_'
+}
+
+format_created_at() {
+    local created_at=$1
+    local normalized
+
+    normalized=$(printf '%s' "$created_at" \
+        | sed -E 's/T/ /; s/\.[0-9]+//; s/Z$//; s/[[:space:]]+UTC$//; s/[+-][0-9]{2}:?[0-9]{2}$//')
+
+    if [[ "$normalized" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        normalized="${normalized} 00:00:00"
+    fi
+
+    date -j -f "%Y-%m-%d %H:%M:%S" "$normalized" "+%Y-%m-%d %H%M|%Y%m%d%H%M.%S|%m/%d/%Y %H:%M:%S" 2>/dev/null
+}
+
+set_file_times() {
+    local file=$1
+    local touch_stamp=$2
+    local setfile_date=$3
+
+    if [ -z "$touch_stamp" ]; then
+        return 0
+    fi
+
+    if ! touch -t "$touch_stamp" "$file" 2>/dev/null; then
+        echo "[WARN] Unable to set modified time for $file"
+    fi
+
+    if command -v SetFile >/dev/null 2>&1; then
+        if ! SetFile -d "$setfile_date" "$file" 2>/dev/null; then
+            echo "[WARN] Unable to set creation time for $file"
+        fi
+    fi
+}
+
+clean_extension() {
+    local ext
+    ext=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+
+    if [ -n "$ext" ] && [ "${#ext}" -le 5 ]; then
+        printf '%s' "$ext"
+        return 0
+    fi
+
+    return 1
+}
+
+extension_from_url() {
+    local url=$1
+    local fallback=$2
+    local path basename ext
+
+    path=${url%%\?*}
+    path=${path%%#*}
+    basename=${path##*/}
+
+    if [[ "$basename" == *.* ]]; then
+        ext=${basename##*.}
+        if clean_extension "$ext"; then
+            return 0
+        fi
+    fi
+
+    printf '%s' "$fallback"
+}
+
+# Extract ID, created_at, and URL
+if ! jq -r '.videos[] | [(.id | tostring), (.created_at // ""), (.video_file_url // "")] | @tsv' "$INPUT_FILE" > "$TEMP_FILE"; then
     echo "Error: Failed to parse JSON from '$INPUT_FILE'"
     exit 1
 fi
@@ -90,18 +160,39 @@ fi
 # Counter for limit (counts successful downloads only)
 COUNT=0
 
-while read -r id url; do
+while IFS=$'\t' read -r id created_at url; do
     # Check limit if set
     if [ "$LIMIT" -gt 0 ] && [ "$COUNT" -ge "$LIMIT" ]; then
         echo "Limit of $LIMIT downloads reached."
         break
     fi
 
-    FILENAME="videos/${id}.mp4"
+    if [ -z "$url" ]; then
+        echo "[SKIP] $id has no download URL."
+        continue
+    fi
+
+    SAFE_ID=$(sanitize_component "$id")
+    TIMESTAMP_FIELDS=""
+    FILENAME_DATE="unknown-date 0000"
+    TOUCH_STAMP=""
+    SETFILE_DATE=""
+
+    if TIMESTAMP_FIELDS=$(format_created_at "$created_at"); then
+        IFS='|' read -r FILENAME_DATE TOUCH_STAMP SETFILE_DATE <<< "$TIMESTAMP_FIELDS"
+    else
+        echo "[WARN] $id has unparseable created_at: $created_at"
+    fi
+
+    EXT=$(extension_from_url "$url" "mp4")
+    FILENAME="videos/${FILENAME_DATE} ${SAFE_ID}.${EXT}"
 
     if [ -f "$FILENAME" ]; then
         echo "[SKIP] $FILENAME already exists."
+        set_file_times "$FILENAME" "$TOUCH_STAMP" "$SETFILE_DATE"
     else
+        TEMP_DOWNLOAD="${TEMP_DIR}/${SAFE_ID}.download"
+
         # Throttling with jitter
         if [ "$JITTER" -gt 0 ]; then
             RAND_JITTER=$(( RANDOM % (JITTER + 1) ))
@@ -114,12 +205,14 @@ while read -r id url; do
         sleep $SLEEP_TIME
 
         echo "[DOWNLOADING] $FILENAME..."
-        if curl -# -L -o "$FILENAME" "$url"; then
+        if curl -# -L -o "$TEMP_DOWNLOAD" "$url"; then
+            mv "$TEMP_DOWNLOAD" "$FILENAME"
+            set_file_times "$FILENAME" "$TOUCH_STAMP" "$SETFILE_DATE"
             echo "[SUCCESS] Saved to $FILENAME"
-            ((COUNT++))
+            COUNT=$((COUNT + 1))
         else
             echo "[ERROR] Failed to download $url"
-            rm -f "$FILENAME"
+            rm -f "$TEMP_DOWNLOAD"
         fi
     fi
 

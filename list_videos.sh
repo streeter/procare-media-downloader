@@ -27,8 +27,8 @@ OUTPUT_FILE="raw_video_list_response.json"
 TEMP_DIR="tmp_pages"
 
 # Throttling settings
-THROTTLE=2
-JITTER=2
+THROTTLE=0
+JITTER=1
 
 # Date range
 START_YEAR=2021
