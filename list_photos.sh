@@ -22,18 +22,18 @@
 set -euo pipefail
 
 # Configuration
+BASE_URL="https://api-school.procareconnect.com/api/web/parent/photos/"
 OUTPUT_FILE="raw_photo_list_response.json"
-TEMP_DIR="tmp_pages"
 
 # Throttling settings
-THROTTLE=2
+THROTTLE=1
 JITTER=2
 
 # Date range
 START_YEAR=2023
-START_MONTH=2
+START_MONTH=1
 END_YEAR=2026
-END_MONTH=2
+END_MONTH=8
 
 # Initialize counters
 EXPECTED_PHOTO_COUNT=0
@@ -48,9 +48,13 @@ if [ ! -f "credentials.txt" ]; then
 fi
 AUTH_TOKEN=$(cat credentials.txt | tr -d '\n')
 
-# Create temp directory for page results
-mkdir -p "$TEMP_DIR"
-rm -f "$TEMP_DIR"/*.json
+# Create a unique temp directory for this run so concurrent list scripts do not
+# delete or merge each other's page files.
+TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/list_photos.XXXXXX")
+cleanup() {
+    rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
 
 # Function to get last day of month (macOS compatible)
 get_last_day() {
@@ -78,8 +82,10 @@ fetch_page() {
     fi
     SLEEP_TIME=$(( THROTTLE + RAND_JITTER ))
 
-    echo "  Sleeping for ${SLEEP_TIME}s..."
-    sleep $SLEEP_TIME
+    if [ "$SLEEP_TIME" -gt 0 ]; then
+        echo "  Sleeping for ${SLEEP_TIME}s..."
+        sleep "$SLEEP_TIME"
+    fi
 
     curl -s "$url" \
       -H 'Accept: application/json' \
@@ -95,7 +101,6 @@ echo ""
 
 CURRENT_YEAR=$START_YEAR
 CURRENT_MONTH=$START_MONTH
-CONSECUTIVE_EMPTY_MONTHS=0
 
 while true; do
     # Check if we've passed the end date
@@ -125,20 +130,18 @@ while true; do
     while true; do
         echo "  Fetching page $PAGE..."
 
-        URL="https://api-school.procareconnect.com/api/web/parent/photos/?page=${PAGE}&filters%5Bphoto%5D%5Bdatetime_from%5D=${DATE_FROM}&filters%5Bphoto%5D%5Bdatetime_to%5D=${DATE_TO}"
+        URL="${BASE_URL}?page=${PAGE}&filters%5Bphoto%5D%5Bdatetime_from%5D=${DATE_FROM}&filters%5Bphoto%5D%5Bdatetime_to%5D=${DATE_TO}"
 
         FILE_INDEX=$((FILE_INDEX + 1))
         CURRENT_PAGE_FILE="${TEMP_DIR}/page_$(printf "%05d" $FILE_INDEX).json"
 
-        fetch_page "$URL" "$CURRENT_PAGE_FILE"
-        TOTAL_API_CALLS=$((TOTAL_API_CALLS + 1))
-
         # Check curl exit code
-        if [ $? -ne 0 ]; then
+        if ! fetch_page "$URL" "$CURRENT_PAGE_FILE"; then
             echo "  Error: Curl command failed for page $PAGE."
             rm -f "$CURRENT_PAGE_FILE"
             break
         fi
+        TOTAL_API_CALLS=$((TOTAL_API_CALLS + 1))
 
         # Validate JSON response
         if ! jq -e . "$CURRENT_PAGE_FILE" >/dev/null 2>&1; then
@@ -174,17 +177,6 @@ while true; do
     echo "  Month ${CURRENT_YEAR}-${MONTH_PADDED} complete: $MONTH_PHOTO_COUNT / $MONTH_EXPECTED_COUNT photos"
     echo ""
 
-    # Track consecutive empty months
-    if [ "$MONTH_PHOTO_COUNT" -eq 0 ]; then
-        CONSECUTIVE_EMPTY_MONTHS=$((CONSECUTIVE_EMPTY_MONTHS + 1))
-        if [ "$CONSECUTIVE_EMPTY_MONTHS" -ge 3 ]; then
-            echo "3 consecutive months with no photos. Stopping."
-            break
-        fi
-    else
-        CONSECUTIVE_EMPTY_MONTHS=0
-    fi
-
     # Advance to next month
     CURRENT_MONTH=$((CURRENT_MONTH + 1))
     if [ "$CURRENT_MONTH" -gt 12 ]; then
@@ -209,8 +201,5 @@ if [ -e "${PAGE_FILES[0]}" ]; then
 else
     echo "{ \"photos\": [], \"total\": 0 }" > "$OUTPUT_FILE"
 fi
-
-# Cleanup
-rm -rf "$TEMP_DIR"
 
 echo "Done. Full photo list saved to $OUTPUT_FILE"

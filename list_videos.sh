@@ -3,8 +3,9 @@
 # list_videos.sh - Fetch paginated video list from Procare API
 #
 # Description:
-#   Retrieves all videos from the Procare parent portal API by paginating
-#   through results and merging them into a single JSON file.
+#   Retrieves all videos from the Procare parent portal API by iterating
+#   through 1-month date ranges and paginating within each month.
+#   Results are merged into a single JSON file.
 #
 # Prerequisites:
 #   - credentials.txt: File containing the Bearer auth token (no newline)
@@ -18,25 +19,27 @@
 # Usage:
 #   ./list_videos.sh
 #
+set -euo pipefail
 
 # Configuration
 BASE_URL="https://api-school.procareconnect.com/api/web/parent/videos/"
 OUTPUT_FILE="raw_video_list_response.json"
-TEMP_DIR="tmp_pages"
+
+# Throttling settings
+THROTTLE=1
+JITTER=2
 
 # Date range
 START_YEAR=2023
-START_MONTH=2
+START_MONTH=1
 END_YEAR=2026
-END_MONTH=2
+END_MONTH=8
 
-# Initialize variables
-PAGE=1
-TOTAL_VIDEOS=0
-PER_PAGE=0
-EXPECTED_PAGES=0
-ACTUAL_PAGES=0
+# Initialize counters
+EXPECTED_VIDEO_COUNT=0
 ACTUAL_VIDEO_COUNT=0
+TOTAL_API_CALLS=0
+FILE_INDEX=0
 
 # Load credentials
 if [ ! -f "credentials.txt" ]; then
@@ -45,11 +48,13 @@ if [ ! -f "credentials.txt" ]; then
 fi
 AUTH_TOKEN=$(cat credentials.txt | tr -d '\n')
 
-
-# Create a temp directory for page results
-mkdir -p "$TEMP_DIR"
-# Clean up any previous run artifacts
-rm -f "$TEMP_DIR"/*.json
+# Create a unique temp directory for this run so concurrent list scripts do not
+# delete or merge each other's page files.
+TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/list_videos.XXXXXX")
+cleanup() {
+    rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
 
 # Function to get last day of month (macOS compatible)
 get_last_day() {
@@ -64,95 +69,137 @@ get_last_day() {
     fi
 }
 
-# Build URL-encoded date range
-START_MONTH_PADDED=$(printf "%02d" $START_MONTH)
-END_MONTH_PADDED=$(printf "%02d" $END_MONTH)
-END_LAST_DAY=$(get_last_day $END_YEAR $END_MONTH)
-DATE_FROM="${START_YEAR}-${START_MONTH_PADDED}-01%2000%3A00"
-DATE_TO="${END_YEAR}-${END_MONTH_PADDED}-${END_LAST_DAY}%2023%3A59"
+# Function to make API call with throttling
+fetch_page() {
+    local url=$1
+    local output_file=$2
 
-echo "Starting video list retrieval..."
-echo "Date range: ${START_YEAR}-${START_MONTH_PADDED}-01 to ${END_YEAR}-${END_MONTH_PADDED}-${END_LAST_DAY}"
+    # Throttling with jitter
+    if [ "$JITTER" -gt 0 ]; then
+        RAND_JITTER=$(( RANDOM % (JITTER + 1) ))
+    else
+        RAND_JITTER=0
+    fi
+    SLEEP_TIME=$(( THROTTLE + RAND_JITTER ))
 
-while true; do
-    echo "Fetching page $PAGE..."
-    
-    # Construct the URL with the current page number
-    URL="https://api-school.procareconnect.com/api/web/parent/videos/?page=${PAGE}&filters%5Bvideo%5D%5Bdatetime_from%5D=${DATE_FROM}&filters%5Bvideo%5D%5Bdatetime_to%5D=${DATE_TO}"
-    
-    CURRENT_PAGE_FILE="${TEMP_DIR}/page_${PAGE}.json"
+    if [ "$SLEEP_TIME" -gt 0 ]; then
+        echo "  Sleeping for ${SLEEP_TIME}s..."
+        sleep "$SLEEP_TIME"
+    fi
 
-    curl -s "$URL" \
+    curl -s "$url" \
       -H 'Accept: application/json' \
       -H "Authorization: Bearer $AUTH_TOKEN" \
-      -o "$CURRENT_PAGE_FILE"
+      -H 'history-data: 1' \
+      -o "$output_file"
+}
 
-    # Check curl exit code
-    if [ $? -ne 0 ]; then
-        echo "Error: Curl command failed for page $PAGE."
+echo "Starting video list retrieval (month by month)..."
+echo "Date range: ${START_YEAR}-$(printf "%02d" $START_MONTH) to ${END_YEAR}-$(printf "%02d" $END_MONTH)"
+echo "Throttle: ${THROTTLE}s base + ${JITTER}s max jitter"
+echo ""
+
+CURRENT_YEAR=$START_YEAR
+CURRENT_MONTH=$START_MONTH
+
+while true; do
+    # Check if we've passed the end date
+    if [ "$CURRENT_YEAR" -gt "$END_YEAR" ]; then
+        echo "Reached end year $END_YEAR."
+        break
+    fi
+    if [ "$CURRENT_YEAR" -eq "$END_YEAR" ] && [ "$CURRENT_MONTH" -gt "$END_MONTH" ]; then
+        echo "Reached end month ${END_YEAR}-$(printf "%02d" $END_MONTH)."
         break
     fi
 
-    # Parse response using jq
-    # Check if the file is valid JSON and has a videos array
-    if ! jq -e . "$CURRENT_PAGE_FILE" >/dev/null 2>&1; then
-        echo "Error: Invalid JSON response on page $PAGE."
-        cat "$CURRENT_PAGE_FILE"
-        break
+    # Format month with leading zero
+    MONTH_PADDED=$(printf "%02d" $CURRENT_MONTH)
+    LAST_DAY=$(get_last_day $CURRENT_YEAR $CURRENT_MONTH)
+
+    # URL-encoded date range for this month
+    DATE_FROM="${CURRENT_YEAR}-${MONTH_PADDED}-01%2000%3A00"
+    DATE_TO="${CURRENT_YEAR}-${MONTH_PADDED}-${LAST_DAY}%2023%3A59"
+
+    echo "=== Fetching ${CURRENT_YEAR}-${MONTH_PADDED} ==="
+
+    PAGE=1
+    MONTH_VIDEO_COUNT=0
+    MONTH_EXPECTED_COUNT=0
+
+    while true; do
+        echo "  Fetching page $PAGE..."
+
+        URL="${BASE_URL}?page=${PAGE}&filters%5Bvideo%5D%5Bdatetime_from%5D=${DATE_FROM}&filters%5Bvideo%5D%5Bdatetime_to%5D=${DATE_TO}"
+
+        FILE_INDEX=$((FILE_INDEX + 1))
+        CURRENT_PAGE_FILE="${TEMP_DIR}/page_$(printf "%05d" $FILE_INDEX).json"
+
+        # Check curl exit code
+        if ! fetch_page "$URL" "$CURRENT_PAGE_FILE"; then
+            echo "  Error: Curl command failed for page $PAGE."
+            rm -f "$CURRENT_PAGE_FILE"
+            break
+        fi
+        TOTAL_API_CALLS=$((TOTAL_API_CALLS + 1))
+
+        # Validate JSON response
+        if ! jq -e . "$CURRENT_PAGE_FILE" >/dev/null 2>&1; then
+            echo "  Error: Invalid JSON response on page $PAGE."
+            cat "$CURRENT_PAGE_FILE"
+            rm -f "$CURRENT_PAGE_FILE"
+            break
+        fi
+
+        VIDEO_COUNT=$(jq '.videos | length' "$CURRENT_PAGE_FILE")
+
+        # Get expected total from first page of each month
+        if [ "$PAGE" -eq 1 ]; then
+            MONTH_EXPECTED_COUNT=$(jq '.total // 0' "$CURRENT_PAGE_FILE")
+            echo "  Expected videos for this month: $MONTH_EXPECTED_COUNT"
+        fi
+
+        # If no videos on this page, we're done with this month
+        if [ "$VIDEO_COUNT" -eq 0 ]; then
+            echo "  No more videos on page $PAGE."
+            rm "$CURRENT_PAGE_FILE"
+            break
+        fi
+
+        MONTH_VIDEO_COUNT=$((MONTH_VIDEO_COUNT + VIDEO_COUNT))
+        echo "  Found $VIDEO_COUNT videos (month total: $MONTH_VIDEO_COUNT)"
+
+        PAGE=$((PAGE + 1))
+    done
+
+    ACTUAL_VIDEO_COUNT=$((ACTUAL_VIDEO_COUNT + MONTH_VIDEO_COUNT))
+    EXPECTED_VIDEO_COUNT=$((EXPECTED_VIDEO_COUNT + MONTH_EXPECTED_COUNT))
+    echo "  Month ${CURRENT_YEAR}-${MONTH_PADDED} complete: $MONTH_VIDEO_COUNT / $MONTH_EXPECTED_COUNT videos"
+    echo ""
+
+    # Advance to next month
+    CURRENT_MONTH=$((CURRENT_MONTH + 1))
+    if [ "$CURRENT_MONTH" -gt 12 ]; then
+        CURRENT_MONTH=1
+        CURRENT_YEAR=$((CURRENT_YEAR + 1))
     fi
-
-    VIDEO_COUNT=$(jq '.videos | length' "$CURRENT_PAGE_FILE")
-    
-    # If no videos, we are done
-    if [ "$VIDEO_COUNT" -eq 0 ]; then
-        echo "No videos found on page $PAGE. Reached end of list."
-        rm "$CURRENT_PAGE_FILE" # Remove the empty page file
-        break
-    fi
-
-    ACTUAL_VIDEO_COUNT=$((ACTUAL_VIDEO_COUNT + VIDEO_COUNT))
-
-    # Retrieve Total and Per Page from the first page
-    if [ "$PAGE" -eq 1 ]; then
-        TOTAL_VIDEOS=$(jq '.total' "$CURRENT_PAGE_FILE")
-        PER_PAGE=$(jq '.per_page' "$CURRENT_PAGE_FILE")
-    fi
-
-    ACTUAL_PAGES=$((ACTUAL_PAGES + 1))
-    PAGE=$((PAGE + 1))
 done
-
-# Calculate Expected Pages
-if [ "$PER_PAGE" -gt 0 ] 2>/dev/null;
-then
-    # Integer division with ceiling: (a + b - 1) / b
-    EXPECTED_PAGES=$(( (TOTAL_VIDEOS + PER_PAGE - 1) / PER_PAGE ))
-else
-    EXPECTED_PAGES=0
-fi
 
 echo ""
 echo "---------------- Summary ----------------"
-echo "Expected Videos:         $TOTAL_VIDEOS"
+echo "Expected Videos:         $EXPECTED_VIDEO_COUNT"
 echo "Actual Videos Retrieved: $ACTUAL_VIDEO_COUNT"
-echo "Videos Per Page:         $PER_PAGE"
-echo "Expected Pages:          $EXPECTED_PAGES"
-echo "Actual Pages Fetched:    $ACTUAL_PAGES"
+echo "Total API Calls:         $TOTAL_API_CALLS"
 echo "-----------------------------------------"
 
 # Combine all videos into one JSON file
 echo "Merging results into $OUTPUT_FILE..."
 
-if [ "$ACTUAL_PAGES" -gt 0 ]; then
-    # Merge all page files. 
-    # Structure: { "videos": [ ... all videos flattened ... ], "total": ... }
-    # We use jq to slurp all files, map to their .videos array, flatten it, and wrap it.
-    jq -s --argjson total "$TOTAL_VIDEOS" 'map(.videos) | add | {videos: ., total: $total}' "$TEMP_DIR"/page_*.json > "$OUTPUT_FILE"
+PAGE_FILES=("$TEMP_DIR"/page_*.json)
+if [ -e "${PAGE_FILES[0]}" ]; then
+    jq -s --argjson total "$ACTUAL_VIDEO_COUNT" 'map(.videos) | add | {videos: ., total: $total}' "$TEMP_DIR"/page_*.json > "$OUTPUT_FILE"
 else
     echo "{ \"videos\": [], \"total\": 0 }" > "$OUTPUT_FILE"
 fi
-
-# Cleanup
-rm -rf "$TEMP_DIR"
 
 echo "Done. Full video list saved to $OUTPUT_FILE"

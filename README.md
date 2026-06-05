@@ -26,53 +26,23 @@ echo -n "your_token_here" > credentials.txt
 
 ## Usage
 
-### Downloading Videos
-
-#### Step 1: List Videos
+### Listing Videos
 
 ```bash
 ./list_videos.sh
 ```
 
-This fetches all videos from the API and saves them to `raw_video_list_response.json`.
+This iterates through each month in the configured date range, fetching all videos and saving them to `raw_video_list_response.json`.
 
 The date range is configured at the top of the script:
 ```bash
 START_YEAR=2023
-START_MONTH=2
+START_MONTH=1
 END_YEAR=2026
-END_MONTH=2
+END_MONTH=8
 ```
 
-#### Step 2: Download Videos
-
-```bash
-./download_videos.sh
-```
-
-Videos are saved to `videos/<video-id>.mp4`.
-
-**Options:**
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-n <limit>` | Number of videos to download (0 = all) | 0 |
-| `-t <seconds>` | Base sleep time between downloads | 2 |
-| `-j <seconds>` | Max random jitter added to sleep | 2 |
-| `-f <file>` | Input JSON file | raw_video_list_response.json |
-
-**Examples:**
-
-```bash
-./download_videos.sh -n 10        # Download first 10 videos
-./download_videos.sh -t 5 -j 3    # Custom throttling
-```
-
----
-
-### Downloading Photos
-
-#### Step 1: List Photos
+### Listing Photos
 
 ```bash
 ./list_photos.sh
@@ -83,69 +53,65 @@ This iterates through each month in the configured date range, fetching all phot
 The date range is configured at the top of the script:
 ```bash
 START_YEAR=2023
-START_MONTH=2
+START_MONTH=1
 END_YEAR=2026
-END_MONTH=2
+END_MONTH=8
 ```
 
-> [!NOTE]
-> The script automatically stops after 3 consecutive months with no photos.
+### Downloading Media
 
-#### Step 2: Download Photos
+After generating the photo and video list files, download both media types:
 
-	```bash
-	./download_photos.sh
-	```
+```bash
+./download_media.sh
+```
 
-	Photos are saved to the `photos/` directory. Filenames are determined by the server's Content-Disposition header.
+Photos are saved to `photos/YYYY-MM-DD HHMM <photo-id>.<ext>`.
+Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 
-	**Options:**
+**Options:**
 
-	| Option | Description | Default |
-	|--------|-------------|---------|
-	| `-n <limit>` | Number of photos to download (0 = all) | 0 |
-	| `-t <seconds>` | Base sleep time between downloads | 2 |
-	| `-j <seconds>` | Max random jitter added to sleep | 2 |
-	| `-f <file>` | Input JSON file | raw_photo_list_response.json |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-n <limit>` | Number of each media type to download (0 = all) | 0 |
+| `-t <seconds>` | Base sleep time between downloads | 0 |
+| `-j <seconds>` | Max random jitter added to sleep | 0 |
+| `-p <file>` | Photo input JSON file | raw_photo_list_response.json |
+| `-v <file>` | Video input JSON file | raw_video_list_response.json |
+| `-m <media>` | Media to download: `all`, `photo`, or `video` | all |
+| `-h`, `--help` | Show usage help | n/a |
 
-	**Examples:**
+**Examples:**
 
-	```bash
-	./download_photos.sh -n 20        # Download first 20 photos
-	./download_photos.sh -t 5 -j 3    # Custom throttling
-	```
-
-	---
+```bash
+./download_media.sh -n 10        # Download first 10 photos and first 10 videos
+./download_media.sh -t 5 -j 3    # Custom throttling
+./download_media.sh -m photo     # Download photos only
+```
 
 ## Resumable Downloads
 
-	Both download scripts support resuming interrupted downloads:
+The download script supports resuming interrupted downloads:
 
-	- **Videos**: Skips files that already exist in `videos/`
-	- **Photos**: Tracks downloaded IDs in `photos/.downloaded_ids`
+- **Videos**: Skips files that already exist in `videos/`
+- **Photos**: Skips files that already exist in `photos/`
 
-	If a download is interrupted, run the script again to continue where you left off.
+If a download is interrupted, run the script again to continue where you left off.
 
 ## Output Files
 
-	| File | Description |
-	|------|-------------|
-	| `raw_video_list_response.json` | Video metadata from API |
-	| `raw_photo_list_response.json` | Photo metadata from API |
-	| `videos/` | Downloaded MP4 video files |
-	| `photos/` | Downloaded photo files |
+| File | Description |
+|------|-------------|
+| `raw_video_list_response.json` | Video metadata from API |
+| `raw_photo_list_response.json` | Photo metadata from API |
+| `videos/` | Downloaded video files |
+| `photos/` | Downloaded photo files |
 
 ## Notes
 
-	- Authentication tokens expire periodically. If you receive authentication errors, obtain a new token.
-	- Throttling is built-in to avoid overwhelming the server. The default is 2-4 seconds between requests.
-	- The date range for both video and photo retrieval is configured via variables at the top of the respective list scripts.
-	- Some photos might be missing the .jpg file extension
-	- Some media may be listed but ultimately fail to download because they have already been deleted from the backend. The file will be saved with the response
-
-```
-<?xml version="1.0" encoding="UTF-8"?>
-<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>
-
-SHA-1 0dde8fd9111d807e202b2fb37f8bcc4052fd861e
-```
+- Authentication tokens expire periodically. If you receive authentication errors, obtain a new token.
+- Use `-t` and `-j` with `download_media.sh` to throttle downloads.
+- The date range for both video and photo retrieval is configured via variables at the top of the respective list scripts.
+- Downloaded filenames use each item's `created_at` value so files sort chronologically by name.
+- On macOS, `download_media.sh` sets file creation time with `SetFile` when available and always tries to set modified time with `touch`.
+- Some media may be listed but ultimately fail to download because they have already been deleted from the backend. Failed downloads are not moved into `photos/` or `videos/`.
