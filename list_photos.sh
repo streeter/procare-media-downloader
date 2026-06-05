@@ -23,7 +23,6 @@ set -euo pipefail
 
 # Configuration
 OUTPUT_FILE="raw_photo_list_response.json"
-TEMP_DIR="tmp_pages"
 
 # Throttling settings
 THROTTLE=1
@@ -48,9 +47,13 @@ if [ ! -f "credentials.txt" ]; then
 fi
 AUTH_TOKEN=$(cat credentials.txt | tr -d '\n')
 
-# Create temp directory for page results
-mkdir -p "$TEMP_DIR"
-rm -f "$TEMP_DIR"/*.json
+# Create a unique temp directory for this run so concurrent list scripts do not
+# delete or merge each other's page files.
+TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/list_photos.XXXXXX")
+cleanup() {
+    rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
 
 # Function to get last day of month (macOS compatible)
 get_last_day() {
@@ -195,8 +198,5 @@ if [ -e "${PAGE_FILES[0]}" ]; then
 else
     echo "{ \"photos\": [], \"total\": 0 }" > "$OUTPUT_FILE"
 fi
-
-# Cleanup
-rm -rf "$TEMP_DIR"
 
 echo "Done. Full photo list saved to $OUTPUT_FILE"

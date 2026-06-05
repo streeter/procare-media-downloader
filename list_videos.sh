@@ -24,7 +24,6 @@ set -euo pipefail
 # Configuration
 BASE_URL="https://api-school.procareconnect.com/api/web/parent/videos/"
 OUTPUT_FILE="raw_video_list_response.json"
-TEMP_DIR="tmp_pages"
 
 # Throttling settings
 THROTTLE=1
@@ -50,10 +49,13 @@ fi
 AUTH_TOKEN=$(cat credentials.txt | tr -d '\n')
 
 
-# Create a temp directory for page results
-mkdir -p "$TEMP_DIR"
-# Clean up any previous run artifacts
-rm -f "$TEMP_DIR"/*.json
+# Create a unique temp directory for this run so concurrent list scripts do not
+# delete or merge each other's page files.
+TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/list_videos.XXXXXX")
+cleanup() {
+    rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
 
 # Function to get last day of month (macOS compatible)
 get_last_day() {
@@ -200,8 +202,5 @@ if [ -e "${PAGE_FILES[0]}" ]; then
 else
     echo "{ \"videos\": [], \"total\": 0 }" > "$OUTPUT_FILE"
 fi
-
-# Cleanup
-rm -rf "$TEMP_DIR"
 
 echo "Done. Full video list saved to $OUTPUT_FILE"
