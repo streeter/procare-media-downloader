@@ -80,7 +80,19 @@ mkdir -p videos
 # Use mktemp for safer temp file creation
 TEMP_FILE=$(mktemp)
 TEMP_DIR=$(mktemp -d)
-trap 'rm -f "$TEMP_FILE"; rm -rf "$TEMP_DIR"' EXIT
+CURRENT_DOWNLOAD=""
+
+cleanup() {
+    rm -f "$TEMP_FILE"
+    rm -rf "$TEMP_DIR"
+    if [ -n "$CURRENT_DOWNLOAD" ]; then
+        rm -f "$CURRENT_DOWNLOAD"
+    fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 sanitize_component() {
     printf '%s' "$1" | tr -c '[:alnum:]_.-' '_'
@@ -191,7 +203,8 @@ while IFS=$'\t' read -r id created_at url; do
         echo "[SKIP] $FILENAME already exists."
         set_file_times "$FILENAME" "$TOUCH_STAMP" "$SETFILE_DATE"
     else
-        TEMP_DOWNLOAD="${TEMP_DIR}/${SAFE_ID}.download"
+        TEMP_DOWNLOAD=$(mktemp "videos/.${SAFE_ID}.download.XXXXXX")
+        CURRENT_DOWNLOAD=$TEMP_DOWNLOAD
 
         # Throttling with jitter
         if [ "$JITTER" -gt 0 ]; then
@@ -207,14 +220,16 @@ while IFS=$'\t' read -r id created_at url; do
         fi
 
         echo "[DOWNLOADING] $FILENAME..."
-        if curl -# -L -o "$TEMP_DOWNLOAD" "$url"; then
+        if curl --fail -# -L -o "$TEMP_DOWNLOAD" "$url"; then
             mv "$TEMP_DOWNLOAD" "$FILENAME"
+            CURRENT_DOWNLOAD=""
             set_file_times "$FILENAME" "$TOUCH_STAMP" "$SETFILE_DATE"
             echo "[SUCCESS] Saved to $FILENAME"
             COUNT=$((COUNT + 1))
         else
             echo "[ERROR] Failed to download $url"
             rm -f "$TEMP_DOWNLOAD"
+            CURRENT_DOWNLOAD=""
         fi
     fi
 

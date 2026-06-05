@@ -80,7 +80,19 @@ mkdir -p photos
 # Use mktemp for safer temp file creation
 TEMP_FILE=$(mktemp)
 TEMP_DIR=$(mktemp -d)
-trap 'rm -f "$TEMP_FILE"; rm -rf "$TEMP_DIR"' EXIT
+CURRENT_DOWNLOAD=""
+
+cleanup() {
+    rm -f "$TEMP_FILE"
+    rm -rf "$TEMP_DIR"
+    if [ -n "$CURRENT_DOWNLOAD" ]; then
+        rm -f "$CURRENT_DOWNLOAD"
+    fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 sanitize_component() {
     printf '%s' "$1" | tr -c '[:alnum:]_.-' '_'
@@ -232,7 +244,8 @@ while IFS=$'\t' read -r id created_at url; do
         set_file_times "$EXISTING_FILE" "$TOUCH_STAMP" "$SETFILE_DATE"
     else
         EXT_GUESS=$(extension_from_url "$url" "jpg")
-        TEMP_DOWNLOAD="${TEMP_DIR}/${SAFE_ID}.download"
+        TEMP_DOWNLOAD=$(mktemp "photos/.${SAFE_ID}.download.XXXXXX")
+        CURRENT_DOWNLOAD=$TEMP_DOWNLOAD
         HEADER_FILE="${TEMP_DIR}/${SAFE_ID}.headers"
 
         # Throttling with jitter
@@ -249,7 +262,7 @@ while IFS=$'\t' read -r id created_at url; do
         fi
 
         echo "[DOWNLOADING] ${BASE_NAME}..."
-        if curl -# -L -D "$HEADER_FILE" -o "$TEMP_DOWNLOAD" "$url"; then
+        if curl --fail -# -L -D "$HEADER_FILE" -o "$TEMP_DOWNLOAD" "$url"; then
             if EXT=$(extension_from_headers "$HEADER_FILE"); then
                 :
             else
@@ -258,12 +271,14 @@ while IFS=$'\t' read -r id created_at url; do
 
             FILENAME="photos/${BASE_NAME}.${EXT}"
             mv "$TEMP_DOWNLOAD" "$FILENAME"
+            CURRENT_DOWNLOAD=""
             set_file_times "$FILENAME" "$TOUCH_STAMP" "$SETFILE_DATE"
             echo "[SUCCESS] Saved to $FILENAME"
             COUNT=$((COUNT + 1))
         else
             echo "[ERROR] Failed to download $id"
             rm -f "$TEMP_DOWNLOAD"
+            CURRENT_DOWNLOAD=""
         fi
     fi
 
