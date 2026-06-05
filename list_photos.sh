@@ -26,8 +26,8 @@ OUTPUT_FILE="raw_photo_list_response.json"
 TEMP_DIR="tmp_pages"
 
 # Throttling settings
-THROTTLE=0
-JITTER=1
+THROTTLE=1
+JITTER=2
 
 # Date range
 START_YEAR=2022
