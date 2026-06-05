@@ -48,7 +48,6 @@ if [ ! -f "credentials.txt" ]; then
 fi
 AUTH_TOKEN=$(cat credentials.txt | tr -d '\n')
 
-
 # Create a unique temp directory for this run so concurrent list scripts do not
 # delete or merge each other's page files.
 TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/list_videos.XXXXXX")
@@ -91,6 +90,7 @@ fetch_page() {
     curl -s "$url" \
       -H 'Accept: application/json' \
       -H "Authorization: Bearer $AUTH_TOKEN" \
+      -H 'history-data: 1' \
       -o "$output_file"
 }
 
@@ -197,9 +197,6 @@ echo "Merging results into $OUTPUT_FILE..."
 
 PAGE_FILES=("$TEMP_DIR"/page_*.json)
 if [ -e "${PAGE_FILES[0]}" ]; then
-    # Merge all page files.
-    # Structure: { "videos": [ ... all videos flattened ... ], "total": ... }
-    # We use jq to slurp all files, map to their .videos array, flatten it, and wrap it.
     jq -s --argjson total "$ACTUAL_VIDEO_COUNT" 'map(.videos) | add | {videos: ., total: $total}' "$TEMP_DIR"/page_*.json > "$OUTPUT_FILE"
 else
     echo "{ \"videos\": [], \"total\": 0 }" > "$OUTPUT_FILE"

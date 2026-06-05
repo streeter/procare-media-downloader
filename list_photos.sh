@@ -22,6 +22,7 @@
 set -euo pipefail
 
 # Configuration
+BASE_URL="https://api-school.procareconnect.com/api/web/parent/photos/"
 OUTPUT_FILE="raw_photo_list_response.json"
 
 # Throttling settings
@@ -129,7 +130,7 @@ while true; do
     while true; do
         echo "  Fetching page $PAGE..."
 
-        URL="https://api-school.procareconnect.com/api/web/parent/photos/?page=${PAGE}&filters%5Bphoto%5D%5Bdatetime_from%5D=${DATE_FROM}&filters%5Bphoto%5D%5Bdatetime_to%5D=${DATE_TO}"
+        URL="${BASE_URL}?page=${PAGE}&filters%5Bphoto%5D%5Bdatetime_from%5D=${DATE_FROM}&filters%5Bphoto%5D%5Bdatetime_to%5D=${DATE_TO}"
 
         FILE_INDEX=$((FILE_INDEX + 1))
         CURRENT_PAGE_FILE="${TEMP_DIR}/page_$(printf "%05d" $FILE_INDEX).json"
