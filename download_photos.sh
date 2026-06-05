@@ -29,8 +29,8 @@ set -euo pipefail
 
 # Default values
 LIMIT=0
-THROTTLE=2
-JITTER=2
+THROTTLE=0
+JITTER=0
 INPUT_FILE="raw_photo_list_response.json"
 
 # Usage function
@@ -243,8 +243,10 @@ while IFS=$'\t' read -r id created_at url; do
         fi
         SLEEP_TIME=$(( THROTTLE + RAND_JITTER ))
 
-        echo "Sleeping for ${SLEEP_TIME}s..."
-        sleep $SLEEP_TIME
+        if [ "$SLEEP_TIME" -gt 0 ]; then
+            echo "Sleeping for ${SLEEP_TIME}s..."
+            sleep "$SLEEP_TIME"
+        fi
 
         echo "[DOWNLOADING] ${BASE_NAME}..."
         if curl -# -L -D "$HEADER_FILE" -o "$TEMP_DOWNLOAD" "$url"; then

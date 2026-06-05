@@ -29,8 +29,8 @@ THROTTLE=1
 JITTER=2
 
 # Date range
-START_YEAR=2022
-START_MONTH=5
+START_YEAR=2023
+START_MONTH=1
 END_YEAR=2026
 END_MONTH=8
 
@@ -81,8 +81,10 @@ fetch_page() {
     fi
     SLEEP_TIME=$(( THROTTLE + RAND_JITTER ))
 
-    echo "  Sleeping for ${SLEEP_TIME}s..."
-    sleep $SLEEP_TIME
+    if [ "$SLEEP_TIME" -gt 0 ]; then
+        echo "  Sleeping for ${SLEEP_TIME}s..."
+        sleep "$SLEEP_TIME"
+    fi
 
     curl -s "$url" \
       -H 'Accept: application/json' \
