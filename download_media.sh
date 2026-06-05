@@ -23,12 +23,14 @@
 #   -p <file>     Photo input JSON file (default: raw_photo_list_response.json)
 #   -v <file>     Video input JSON file (default: raw_video_list_response.json)
 #   -m <media>    Media to download: all, photo, or video (default: all)
+#   -P <count>    Parallel downloads per media type (default: 4)
 #
 # Usage:
 #   ./download_media.sh
 #   ./download_media.sh -n 10
 #   ./download_media.sh -t 5 -j 3
 #   ./download_media.sh -m photo -p custom_photos.json
+#   ./download_media.sh -P 8
 #
 set -euo pipefail
 
@@ -39,26 +41,60 @@ JITTER=0
 PHOTO_INPUT_FILE="raw_photo_list_response.json"
 VIDEO_INPUT_FILE="raw_video_list_response.json"
 MEDIA_SELECTION=all
+PARALLEL_DOWNLOADS=4
+RUN_ID="download-media-$$"
+ACTIVE_PIDS=()
+ACTIVE_RESULTS=()
+BATCH_DOWNLOADED=0
+FAILED_DOWNLOADS=0
 
 usage() {
-    echo "Usage: $0 [-n limit] [-t throttle_sec] [-j jitter_sec] [-p photo_input] [-v video_input] [-m all|photo|video]"
+    echo "Usage: $0 [-n limit] [-t throttle_sec] [-j jitter_sec] [-p photo_input] [-v video_input] [-m all|photo|video] [-P parallel]"
     echo "  -n: Number of each media type to download (default: 0 = all)"
     echo "  -t: Base sleep time between downloads (default: 0)"
     echo "  -j: Max random jitter time added to sleep (default: 0)"
     echo "  -p: Photo input JSON file (default: raw_photo_list_response.json)"
     echo "  -v: Video input JSON file (default: raw_video_list_response.json)"
     echo "  -m: Media to download: all, photo, or video (default: all)"
+    echo "  -P, --parallel: Parallel downloads per media type (default: 4)"
     echo "  -h, --help: Show this help message"
     exit "${1:-1}"
 }
 
-for arg in "$@"; do
-    case "$arg" in
-        -h|--help) usage 0 ;;
+ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --parallel)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --parallel requires a value"
+                exit 1
+            fi
+            ARGS+=("-P" "$1")
+            ;;
+        --parallel=*)
+            ARGS+=("-P" "${1#*=}")
+            ;;
+        --help)
+            usage 0
+            ;;
+        --)
+            shift
+            while [ "$#" -gt 0 ]; do
+                ARGS+=("$1")
+                shift
+            done
+            break
+            ;;
+        *)
+            ARGS+=("$1")
+            ;;
     esac
+    shift
 done
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
-while getopts "n:t:j:p:v:m:h" opt; do
+while getopts "n:t:j:p:v:m:P:h" opt; do
     case $opt in
         n) LIMIT=$OPTARG ;;
         t) THROTTLE=$OPTARG ;;
@@ -66,6 +102,7 @@ while getopts "n:t:j:p:v:m:h" opt; do
         p) PHOTO_INPUT_FILE=$OPTARG ;;
         v) VIDEO_INPUT_FILE=$OPTARG ;;
         m) MEDIA_SELECTION=$OPTARG ;;
+        P) PARALLEL_DOWNLOADS=$OPTARG ;;
         h) usage 0 ;;
         *) usage ;;
     esac
@@ -83,6 +120,10 @@ if ! [[ "$JITTER" =~ ^[0-9]+$ ]]; then
     echo "Error: -j must be a non-negative integer"
     exit 1
 fi
+if ! [[ "$PARALLEL_DOWNLOADS" =~ ^[0-9]+$ ]] || [ "$PARALLEL_DOWNLOADS" -lt 1 ]; then
+    echo "Error: -P/--parallel must be a positive integer"
+    exit 1
+fi
 case "$MEDIA_SELECTION" in
     all|photo|video) ;;
     *)
@@ -95,6 +136,19 @@ TEMP_DIR=$(mktemp -d)
 CURRENT_DOWNLOAD=""
 
 cleanup() {
+    local partial
+
+    if [ "${#ACTIVE_PIDS[@]}" -gt 0 ]; then
+        kill "${ACTIVE_PIDS[@]}" 2>/dev/null || true
+        wait "${ACTIVE_PIDS[@]}" 2>/dev/null || true
+    fi
+
+    for partial in photos/.*."$RUN_ID".download.* videos/.*."$RUN_ID".download.*; do
+        if [ -e "$partial" ]; then
+            rm -f "$partial"
+        fi
+    done
+
     rm -rf "$TEMP_DIR"
     if [ -n "$CURRENT_DOWNLOAD" ]; then
         rm -f "$CURRENT_DOWNLOAD"
@@ -249,14 +303,151 @@ validate_selected_inputs() {
     done
 }
 
+download_media_item() {
+    local result_file=$1
+    local media=$2
+    local output_dir=$3
+    local default_extension=$4
+    local id=$5
+    local created_at=$6
+    local url=$7
+    local safe_id timestamp_fields filename_date touch_stamp setfile_date
+    local base_name existing_file ext_guess temp_download header_file
+    local sleep_time rand_jitter ext filename
+
+    safe_id=$(sanitize_component "$id")
+    timestamp_fields=""
+    filename_date="unknown-date 0000"
+    touch_stamp=""
+    setfile_date=""
+    temp_download=""
+
+    if timestamp_fields=$(format_created_at "$created_at"); then
+        IFS='|' read -r filename_date touch_stamp setfile_date <<< "$timestamp_fields"
+    else
+        echo "[WARN] $id has unparseable created_at: $created_at"
+    fi
+
+    base_name="${filename_date} ${safe_id}"
+
+    if existing_file=$(find_existing_file "$output_dir" "$base_name"); then
+        echo "[SKIP] $existing_file already exists."
+        set_file_times "$existing_file" "$touch_stamp" "$setfile_date"
+        printf '2\n' > "$result_file"
+        return 0
+    fi
+
+    ext_guess=$(extension_from_url "$url" "$default_extension")
+    temp_download=$(mktemp "${output_dir}/.${safe_id}.${RUN_ID}.download.XXXXXX")
+    CURRENT_DOWNLOAD=$temp_download
+    header_file=$(mktemp "${TEMP_DIR}/${media}-${safe_id}.headers.XXXXXX")
+
+    if [ "$JITTER" -gt 0 ]; then
+        rand_jitter=$(( RANDOM % (JITTER + 1) ))
+    else
+        rand_jitter=0
+    fi
+    sleep_time=$(( THROTTLE + rand_jitter ))
+
+    if [ "$sleep_time" -gt 0 ]; then
+        echo "Sleeping for ${sleep_time}s before ${base_name}..."
+        sleep "$sleep_time"
+    fi
+
+    echo "[DOWNLOADING] ${base_name}..."
+    if [ "$PARALLEL_DOWNLOADS" -gt 1 ]; then
+        if curl --fail --silent --show-error -L -D "$header_file" -o "$temp_download" "$url"; then
+            :
+        else
+            echo "[ERROR] Failed to download $id"
+            rm -f "$temp_download"
+            CURRENT_DOWNLOAD=""
+            printf '1\n' > "$result_file"
+            return 0
+        fi
+    else
+        if curl --fail -# -L -D "$header_file" -o "$temp_download" "$url"; then
+            :
+        else
+            echo "[ERROR] Failed to download $id"
+            rm -f "$temp_download"
+            CURRENT_DOWNLOAD=""
+            printf '1\n' > "$result_file"
+            return 0
+        fi
+    fi
+
+    if ext=$(extension_from_headers "$header_file"); then
+        :
+    else
+        ext=$ext_guess
+    fi
+
+    filename="${output_dir}/${base_name}.${ext}"
+    mv "$temp_download" "$filename"
+    CURRENT_DOWNLOAD=""
+    set_file_times "$filename" "$touch_stamp" "$setfile_date"
+    echo "[SUCCESS] Saved to $filename"
+    printf '0\n' > "$result_file"
+    return 0
+}
+
+launch_download_job() {
+    local result_file=$1
+    shift
+
+    (
+        download_media_item "$result_file" "$@"
+    ) &
+
+    ACTIVE_PIDS+=("$!")
+    ACTIVE_RESULTS+=("$result_file")
+}
+
+wait_for_active_jobs() {
+    local i pid result_file wait_status status
+
+    BATCH_DOWNLOADED=0
+
+    for ((i = 0; i < ${#ACTIVE_PIDS[@]}; i++)); do
+        pid=${ACTIVE_PIDS[$i]}
+        result_file=${ACTIVE_RESULTS[$i]}
+
+        if wait "$pid"; then
+            wait_status=0
+        else
+            wait_status=$?
+        fi
+
+        if [ -f "$result_file" ]; then
+            status=$(sed -n '1p' "$result_file")
+        else
+            status=$wait_status
+        fi
+
+        case "$status" in
+            0)
+                BATCH_DOWNLOADED=$((BATCH_DOWNLOADED + 1))
+                ;;
+            2)
+                ;;
+            *)
+                FAILED_DOWNLOADS=$((FAILED_DOWNLOADS + 1))
+                ;;
+        esac
+    done
+
+    ACTIVE_PIDS=()
+    ACTIVE_RESULTS=()
+}
+
 download_one_media_type() {
     local media=$1
     local media_plural="${media}s"
     local output_dir=$media_plural
     local input_file default_extension url_field
-    local temp_file count
-    local id created_at url safe_id timestamp_fields filename_date touch_stamp setfile_date
-    local base_name existing_file ext_guess temp_download header_file sleep_time rand_jitter ext filename
+    local temp_file count limit_reached active_count should_wait
+    local id created_at url safe_id result_file
 
     case "$media" in
         photo)
@@ -284,11 +475,39 @@ download_one_media_type() {
     fi
 
     count=0
-    echo "Downloading ${media_plural} from $input_file..."
+    limit_reached=0
+    FAILED_DOWNLOADS=0
+    ACTIVE_PIDS=()
+    ACTIVE_RESULTS=()
+
+    echo "Downloading ${media_plural} from $input_file with ${PARALLEL_DOWNLOADS} parallel download(s)..."
 
     while IFS=$'\t' read -r id created_at url; do
-        if [ "$LIMIT" -gt 0 ] && [ "$count" -ge "$LIMIT" ]; then
-            echo "Limit of $LIMIT ${media} downloads reached."
+        while :; do
+            active_count=${#ACTIVE_PIDS[@]}
+            should_wait=0
+
+            if [ "$active_count" -ge "$PARALLEL_DOWNLOADS" ]; then
+                should_wait=1
+            fi
+            if [ "$LIMIT" -gt 0 ] && [ $((count + active_count)) -ge "$LIMIT" ]; then
+                should_wait=1
+            fi
+            if [ "$should_wait" -eq 0 ]; then
+                break
+            fi
+
+            wait_for_active_jobs
+            count=$((count + BATCH_DOWNLOADED))
+
+            if [ "$LIMIT" -gt 0 ] && [ "$count" -ge "$LIMIT" ]; then
+                echo "Limit of $LIMIT ${media} downloads reached."
+                limit_reached=1
+                break
+            fi
+        done
+
+        if [ "$limit_reached" -eq 1 ]; then
             break
         fi
 
@@ -298,63 +517,19 @@ download_one_media_type() {
         fi
 
         safe_id=$(sanitize_component "$id")
-        timestamp_fields=""
-        filename_date="unknown-date 0000"
-        touch_stamp=""
-        setfile_date=""
-
-        if timestamp_fields=$(format_created_at "$created_at"); then
-            IFS='|' read -r filename_date touch_stamp setfile_date <<< "$timestamp_fields"
-        else
-            echo "[WARN] $id has unparseable created_at: $created_at"
-        fi
-
-        base_name="${filename_date} ${safe_id}"
-
-        if existing_file=$(find_existing_file "$output_dir" "$base_name"); then
-            echo "[SKIP] $existing_file already exists."
-            set_file_times "$existing_file" "$touch_stamp" "$setfile_date"
-        else
-            ext_guess=$(extension_from_url "$url" "$default_extension")
-            temp_download=$(mktemp "${output_dir}/.${safe_id}.download.XXXXXX")
-            CURRENT_DOWNLOAD=$temp_download
-            header_file="${TEMP_DIR}/${media}-${safe_id}.headers"
-
-            if [ "$JITTER" -gt 0 ]; then
-                rand_jitter=$(( RANDOM % (JITTER + 1) ))
-            else
-                rand_jitter=0
-            fi
-            sleep_time=$(( THROTTLE + rand_jitter ))
-
-            if [ "$sleep_time" -gt 0 ]; then
-                echo "Sleeping for ${sleep_time}s..."
-                sleep "$sleep_time"
-            fi
-
-            echo "[DOWNLOADING] ${base_name}..."
-            if curl --fail -# -L -D "$header_file" -o "$temp_download" "$url"; then
-                if ext=$(extension_from_headers "$header_file"); then
-                    :
-                else
-                    ext=$ext_guess
-                fi
-
-                filename="${output_dir}/${base_name}.${ext}"
-                mv "$temp_download" "$filename"
-                CURRENT_DOWNLOAD=""
-                set_file_times "$filename" "$touch_stamp" "$setfile_date"
-                echo "[SUCCESS] Saved to $filename"
-                count=$((count + 1))
-            else
-                echo "[ERROR] Failed to download $id"
-                rm -f "$temp_download"
-                CURRENT_DOWNLOAD=""
-            fi
-        fi
+        result_file=$(mktemp "${TEMP_DIR}/${media}-${safe_id}.status.XXXXXX")
+        launch_download_job "$result_file" "$media" "$output_dir" "$default_extension" "$id" "$created_at" "$url"
     done < "$temp_file"
 
+    if [ "${#ACTIVE_PIDS[@]}" -gt 0 ]; then
+        wait_for_active_jobs
+        count=$((count + BATCH_DOWNLOADED))
+    fi
+
     echo "Downloaded $count ${media}(s)."
+    if [ "$FAILED_DOWNLOADS" -gt 0 ]; then
+        echo "[WARN] $FAILED_DOWNLOADS ${media} download(s) failed."
+    fi
 }
 
 validate_selected_inputs

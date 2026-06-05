@@ -79,6 +79,7 @@ Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 | `-p <file>` | Photo input JSON file | raw_photo_list_response.json |
 | `-v <file>` | Video input JSON file | raw_video_list_response.json |
 | `-m <media>` | Media to download: `all`, `photo`, or `video` | all |
+| `-P`, `--parallel <count>` | Parallel downloads per media type | 4 |
 | `-h`, `--help` | Show usage help | n/a |
 
 **Examples:**
@@ -87,6 +88,7 @@ Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 ./download_media.sh -n 10        # Download first 10 photos and first 10 videos
 ./download_media.sh -t 5 -j 3    # Custom throttling
 ./download_media.sh -m photo     # Download photos only
+./download_media.sh -P 8         # Run up to 8 downloads at a time
 ```
 
 ## Resumable Downloads
@@ -111,6 +113,7 @@ If a download is interrupted, run the script again to continue where you left of
 
 - Authentication tokens expire periodically. If you receive authentication errors, obtain a new token.
 - Use `-t` and `-j` with `download_media.sh` to throttle downloads.
+- Use `-P` or `--parallel` to control concurrent downloads.
 - The date range for both video and photo retrieval is configured via variables at the top of the respective list scripts.
 - Downloaded filenames use each item's `created_at` value so files sort chronologically by name.
 - On macOS, `download_media.sh` sets file creation time with `SetFile` when available and always tries to set modified time with `touch`.
