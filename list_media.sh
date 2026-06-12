@@ -27,18 +27,17 @@
 #
 set -euo pipefail
 
-# Date range
-START_YEAR=2023
-START_MONTH=1
-END_YEAR=2026
-END_MONTH=8
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=media_common.sh
+. "$SCRIPT_DIR/media_common.sh"
 
-# Throttling settings
-THROTTLE=1
-JITTER=2
-
-# Default media selection
-MEDIA_SELECTION=all
+START_YEAR=$DEFAULT_START_YEAR
+START_MONTH=$DEFAULT_START_MONTH
+END_YEAR=$DEFAULT_END_YEAR
+END_MONTH=$DEFAULT_END_MONTH
+THROTTLE=$DEFAULT_LIST_THROTTLE
+JITTER=$DEFAULT_LIST_JITTER
+MEDIA_SELECTION=$DEFAULT_MEDIA_SELECTION
 TEMP_DIRS=()
 
 cleanup() {
@@ -63,14 +62,14 @@ Usage: $0 [-m all|photo|video] [-t throttle_sec] [-j jitter_sec] [-h]
 Fetch paginated Procare media lists into JSON files.
 
 Options:
-  -m: Media to list: all, photo, or video (default: all)
-  -t: Base sleep time between API calls (default: $THROTTLE)
-  -j: Max random jitter added to sleep (default: $JITTER)
+  -m: Media to list: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)
+  -t: Base sleep time between API calls (default: $DEFAULT_LIST_THROTTLE)
+  -j: Max random jitter added to sleep (default: $DEFAULT_LIST_JITTER)
   -h: Show this help message
 
 Outputs:
-  photo: raw_photo_list_response.json
-  video: raw_video_list_response.json
+  photo: $DEFAULT_PHOTO_LIST_FILE
+  video: $DEFAULT_VIDEO_LIST_FILE
 EOF
     exit "${1:-1}"
 }
@@ -91,56 +90,10 @@ if [ "$#" -gt 0 ]; then
     usage
 fi
 
-case "$MEDIA_SELECTION" in
-    all|photo|video) ;;
-    *)
-        echo "Error: -m must be one of: all, photo, video"
-        exit 1
-        ;;
-esac
-if ! [[ "$THROTTLE" =~ ^[0-9]+$ ]]; then
-    echo "Error: -t must be a non-negative integer"
-    exit 1
-fi
-if ! [[ "$JITTER" =~ ^[0-9]+$ ]]; then
-    echo "Error: -j must be a non-negative integer"
-    exit 1
-fi
-
-# Load credentials
-if [ ! -f "credentials.txt" ]; then
-    echo "Error: credentials.txt not found."
-    exit 1
-fi
-
-AUTH_TOKENS=()
-while IFS= read -r credential || [ -n "$credential" ]; do
-    credential=${credential%$'\r'}
-    credential=${credential%%#*}
-    credential=$(printf '%s' "$credential" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
-
-    case "$credential" in
-        "")
-            continue
-            ;;
-        Bearer\ *)
-            credential=${credential#Bearer }
-            ;;
-        bearer\ *)
-            credential=${credential#bearer }
-            ;;
-    esac
-
-    credential=$(printf '%s' "$credential" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
-    if [ -n "$credential" ]; then
-        AUTH_TOKENS+=("$credential")
-    fi
-done < credentials.txt
-
-if [ "${#AUTH_TOKENS[@]}" -eq 0 ]; then
-    echo "Error: credentials.txt does not contain any credentials."
-    exit 1
-fi
+validate_media_selection "$MEDIA_SELECTION" "-m" || exit 1
+validate_non_negative_integer "-t" "$THROTTLE" || exit 1
+validate_non_negative_integer "-j" "$JITTER" || exit 1
+load_credentials "$DEFAULT_CREDENTIALS_FILE" || exit 1
 
 # Function to get last day of month (macOS compatible)
 get_last_day() {
@@ -161,20 +114,8 @@ fetch_page() {
     local auth_token=$1
     local url=$2
     local output_file=$3
-    local rand_jitter
-    local sleep_time
 
-    if [ "$JITTER" -gt 0 ]; then
-        rand_jitter=$(( RANDOM % (JITTER + 1) ))
-    else
-        rand_jitter=0
-    fi
-    sleep_time=$(( THROTTLE + rand_jitter ))
-
-    if [ "$sleep_time" -gt 0 ]; then
-        echo "  Sleeping for ${sleep_time}s..."
-        sleep "$sleep_time"
-    fi
+    sleep_with_jitter "$THROTTLE" "$JITTER" "  Sleeping for " "s..."
 
     curl -s "$url" \
       -H 'Accept: application/json' \
@@ -185,10 +126,10 @@ fetch_page() {
 
 list_media_type() {
     local media_type=$1
-    local plural="${media_type}s"
+    local plural
     local display_plural
-    local base_url="https://api-school.procareconnect.com/api/web/parent/${plural}/"
-    local output_file="raw_${media_type}_list_response.json"
+    local base_url
+    local output_file
     local temp_dir
     local expected_count=0
     local actual_count=0
@@ -209,10 +150,10 @@ list_media_type() {
     local item_count
     local page_files
 
-    case "$media_type" in
-        photo) display_plural=Photos ;;
-        video) display_plural=Videos ;;
-    esac
+    plural=$(media_plural "$media_type")
+    display_plural=$(media_display_plural "$media_type")
+    base_url="https://api-school.procareconnect.com/api/web/parent/${plural}/"
+    output_file=$(default_list_file_for_media "$media_type")
 
     temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/list_${plural}.XXXXXX")
     TEMP_DIRS+=("$temp_dir")
@@ -330,8 +271,9 @@ list_media_type() {
 
 case "$MEDIA_SELECTION" in
     all)
-        list_media_type photo
-        list_media_type video
+        for media_type in "${MEDIA_TYPES[@]}"; do
+            list_media_type "$media_type"
+        done
         ;;
     photo|video)
         list_media_type "$MEDIA_SELECTION"

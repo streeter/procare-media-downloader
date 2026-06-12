@@ -35,16 +35,19 @@
 #
 set -euo pipefail
 
-# Default values
-LIMIT=0
-THROTTLE=0
-JITTER=0
-PHOTO_INPUT_FILE="raw_photo_list_response.json"
-VIDEO_INPUT_FILE="raw_video_list_response.json"
-MEDIA_SELECTION=all
-PARALLEL_DOWNLOADS=4
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=media_common.sh
+. "$SCRIPT_DIR/media_common.sh"
+
+LIMIT=$DEFAULT_DOWNLOAD_LIMIT
+THROTTLE=$DEFAULT_DOWNLOAD_THROTTLE
+JITTER=$DEFAULT_DOWNLOAD_JITTER
+PHOTO_INPUT_FILE=$DEFAULT_PHOTO_LIST_FILE
+VIDEO_INPUT_FILE=$DEFAULT_VIDEO_LIST_FILE
+MEDIA_SELECTION=$DEFAULT_MEDIA_SELECTION
+PARALLEL_DOWNLOADS=$DEFAULT_PARALLEL_DOWNLOADS
 RUN_ID="download-media-$$"
-MEDIA_TIMEZONE="America/New_York"
+MEDIA_TIMEZONE=$DEFAULT_MEDIA_TIMEZONE
 EXIFTOOL_BIN=""
 ACTIVE_PIDS=()
 ACTIVE_RESULTS=()
@@ -53,13 +56,13 @@ FAILED_DOWNLOADS=0
 
 usage() {
     echo "Usage: $0 [-n limit] [-t throttle_sec] [-j jitter_sec] [-p photo_input] [-v video_input] [-m all|photo|video] [-P parallel]"
-    echo "  -n: Number of each media type to download (default: 0 = all)"
-    echo "  -t: Base sleep time between downloads (default: 0)"
-    echo "  -j: Max random jitter time added to sleep (default: 0)"
-    echo "  -p: Photo input JSON file (default: raw_photo_list_response.json)"
-    echo "  -v: Video input JSON file (default: raw_video_list_response.json)"
-    echo "  -m: Media to download: all, photo, or video (default: all)"
-    echo "  -P, --parallel: Parallel downloads per media type (default: 4)"
+    echo "  -n: Number of each media type to download (default: $DEFAULT_DOWNLOAD_LIMIT = all)"
+    echo "  -t: Base sleep time between downloads (default: $DEFAULT_DOWNLOAD_THROTTLE)"
+    echo "  -j: Max random jitter time added to sleep (default: $DEFAULT_DOWNLOAD_JITTER)"
+    echo "  -p: Photo input JSON file (default: $DEFAULT_PHOTO_LIST_FILE)"
+    echo "  -v: Video input JSON file (default: $DEFAULT_VIDEO_LIST_FILE)"
+    echo "  -m: Media to download: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)"
+    echo "  -P, --parallel: Parallel downloads per media type (default: $DEFAULT_PARALLEL_DOWNLOADS)"
     echo "  -h, --help: Show this help message"
     exit "${1:-1}"
 }
@@ -111,29 +114,11 @@ while getopts "n:t:j:p:v:m:P:h" opt; do
     esac
 done
 
-if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
-    echo "Error: -n must be a non-negative integer"
-    exit 1
-fi
-if ! [[ "$THROTTLE" =~ ^[0-9]+$ ]]; then
-    echo "Error: -t must be a non-negative integer"
-    exit 1
-fi
-if ! [[ "$JITTER" =~ ^[0-9]+$ ]]; then
-    echo "Error: -j must be a non-negative integer"
-    exit 1
-fi
-if ! [[ "$PARALLEL_DOWNLOADS" =~ ^[0-9]+$ ]] || [ "$PARALLEL_DOWNLOADS" -lt 1 ]; then
-    echo "Error: -P/--parallel must be a positive integer"
-    exit 1
-fi
-case "$MEDIA_SELECTION" in
-    all|photo|video) ;;
-    *)
-        echo "Error: -m must be one of: all, photo, video"
-        exit 1
-        ;;
-esac
+validate_non_negative_integer "-n" "$LIMIT" || exit 1
+validate_non_negative_integer "-t" "$THROTTLE" || exit 1
+validate_non_negative_integer "-j" "$JITTER" || exit 1
+validate_positive_integer "-P/--parallel" "$PARALLEL_DOWNLOADS" || exit 1
+validate_media_selection "$MEDIA_SELECTION" "-m" || exit 1
 
 TEMP_DIR=$(mktemp -d)
 CURRENT_DOWNLOAD=""
@@ -338,7 +323,7 @@ find_existing_file() {
 should_download_media() {
     local media=$1
 
-    [ "$MEDIA_SELECTION" = all ] || [ "$MEDIA_SELECTION" = "$media" ]
+    media_is_selected "$media" "$MEDIA_SELECTION"
 }
 
 input_file_for_media() {
@@ -375,7 +360,7 @@ download_media_item() {
     local safe_id timestamp_fields filename_date touch_stamp setfile_date
     local metadata_stamp iso_stamp timezone_offset_raw timezone_offset
     local base_name existing_file ext_guess temp_download header_file
-    local sleep_time rand_jitter ext filename
+    local ext filename
 
     safe_id=$(sanitize_component "$id")
     timestamp_fields=""
@@ -410,17 +395,7 @@ download_media_item() {
     CURRENT_DOWNLOAD=$temp_download
     header_file=$(mktemp "${TEMP_DIR}/${media}-${safe_id}.headers.XXXXXX")
 
-    if [ "$JITTER" -gt 0 ]; then
-        rand_jitter=$(( RANDOM % (JITTER + 1) ))
-    else
-        rand_jitter=0
-    fi
-    sleep_time=$(( THROTTLE + rand_jitter ))
-
-    if [ "$sleep_time" -gt 0 ]; then
-        echo "Sleeping for ${sleep_time}s before ${base_name}..."
-        sleep "$sleep_time"
-    fi
+    sleep_with_jitter "$THROTTLE" "$JITTER" "Sleeping for " "s before ${base_name}..."
 
     echo "[DOWNLOADING] ${base_name}..."
     if [ "$PARALLEL_DOWNLOADS" -gt 1 ]; then
@@ -512,11 +487,14 @@ wait_for_active_jobs() {
 
 download_one_media_type() {
     local media=$1
-    local media_plural="${media}s"
-    local output_dir=$media_plural
+    local media_collection
+    local output_dir
     local input_file default_extension url_field
     local temp_file count limit_reached active_count should_wait
     local id created_at url safe_id result_file
+
+    media_collection=$(media_plural "$media")
+    output_dir=$media_collection
 
     case "$media" in
         photo)
@@ -538,7 +516,7 @@ download_one_media_type() {
     mkdir -p "$output_dir"
     temp_file="${TEMP_DIR}/${media}.tsv"
 
-    if ! jq -r --arg collection "$media_plural" --arg url_field "$url_field" '.[$collection][] | [(.id | tostring), (.created_at // ""), (.[$url_field] // "")] | @tsv' "$input_file" > "$temp_file"; then
+    if ! jq -r --arg collection "$media_collection" --arg url_field "$url_field" '.[$collection][] | [(.id | tostring), (.created_at // ""), (.[$url_field] // "")] | @tsv' "$input_file" > "$temp_file"; then
         echo "Error: Failed to parse JSON from '$input_file'"
         exit 1
     fi
@@ -549,7 +527,7 @@ download_one_media_type() {
     ACTIVE_PIDS=()
     ACTIVE_RESULTS=()
 
-    echo "Downloading ${media_plural} from $input_file with ${PARALLEL_DOWNLOADS} parallel download(s)..."
+    echo "Downloading ${media_collection} from $input_file with ${PARALLEL_DOWNLOADS} parallel download(s)..."
 
     while IFS=$'\t' read -r id created_at url; do
         while :; do
