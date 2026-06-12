@@ -3,9 +3,13 @@ credentials.txt
 tmp_pages/
 raw_video_list_response.json
 raw_photo_list_response.json
+raw_mobile_media_response.json
 example_raw_photo_list_response.json
 example_raw_video_list_response.json
 videos/
 photos/
+app-cache-export/
+tls-captures/
+__pycache__/
 
 .gemini-clipboard/

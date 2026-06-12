@@ -11,6 +11,7 @@
 #   - raw_photo_list_response.json and raw_video_list_response.json
 #   - jq: Required for JSON parsing
 #   - curl: Required for downloads
+#   - exiftool: Optional; writes embedded media creation metadata when present
 #
 # Output:
 #   - photos/YYYY-MM-DD HHMM <photo-id>.<ext>: Downloaded photo files
@@ -43,6 +44,8 @@ VIDEO_INPUT_FILE="raw_video_list_response.json"
 MEDIA_SELECTION=all
 PARALLEL_DOWNLOADS=4
 RUN_ID="download-media-$$"
+MEDIA_TIMEZONE="America/New_York"
+EXIFTOOL_BIN=""
 ACTIVE_PIDS=()
 ACTIVE_RESULTS=()
 BATCH_DOWNLOADED=0
@@ -174,7 +177,18 @@ format_created_at() {
         normalized="${normalized} 00:00:00"
     fi
 
-    date -j -f "%Y-%m-%d %H:%M:%S" "$normalized" "+%Y-%m-%d %H%M|%Y%m%d%H%M.%S|%m/%d/%Y %H:%M:%S" 2>/dev/null
+    TZ="$MEDIA_TIMEZONE" date -j -f "%Y-%m-%d %H:%M:%S" "$normalized" "+%Y-%m-%d %H%M|%Y%m%d%H%M.%S|%m/%d/%Y %H:%M:%S|%Y:%m:%d %H:%M:%S|%Y-%m-%dT%H:%M:%S|%z" 2>/dev/null
+}
+
+colonize_timezone_offset() {
+    local offset=$1
+
+    if [[ "$offset" =~ ^[+-][0-9]{4}$ ]]; then
+        printf '%s:%s' "${offset:0:3}" "${offset:3:2}"
+        return 0
+    fi
+
+    return 1
 }
 
 set_file_times() {
@@ -186,15 +200,62 @@ set_file_times() {
         return 0
     fi
 
-    if ! touch -t "$touch_stamp" "$file" 2>/dev/null; then
+    if ! TZ="$MEDIA_TIMEZONE" touch -t "$touch_stamp" "$file" 2>/dev/null; then
         echo "[WARN] Unable to set modified time for $file"
     fi
 
     if command -v SetFile >/dev/null 2>&1; then
-        if ! SetFile -d "$setfile_date" "$file" 2>/dev/null; then
+        if ! TZ="$MEDIA_TIMEZONE" SetFile -d "$setfile_date" "$file" 2>/dev/null; then
             echo "[WARN] Unable to set creation time for $file"
         fi
     fi
+}
+
+set_embedded_media_times() {
+    local media=$1
+    local file=$2
+    local metadata_stamp=$3
+    local iso_stamp=$4
+    local timezone_offset=$5
+    local timestamp_with_offset iso_timestamp_with_offset
+
+    if [ -z "$metadata_stamp" ] || [ -z "$timezone_offset" ] || [ -z "$EXIFTOOL_BIN" ]; then
+        return 0
+    fi
+
+    timestamp_with_offset="${metadata_stamp}${timezone_offset}"
+    iso_timestamp_with_offset="${iso_stamp}${timezone_offset}"
+
+    case "$media" in
+        photo)
+            if ! "$EXIFTOOL_BIN" -overwrite_original -P -q \
+                "-AllDates=$metadata_stamp" \
+                "-OffsetTime=$timezone_offset" \
+                "-OffsetTimeOriginal=$timezone_offset" \
+                "-OffsetTimeDigitized=$timezone_offset" \
+                "-XMP:CreateDate=$iso_timestamp_with_offset" \
+                "-XMP:ModifyDate=$iso_timestamp_with_offset" \
+                "-XMP:DateCreated=$iso_timestamp_with_offset" \
+                "$file" >/dev/null 2>&1; then
+                echo "[WARN] Unable to set embedded creation time for $file"
+            fi
+            ;;
+        video)
+            if ! "$EXIFTOOL_BIN" -overwrite_original -P -q -api QuickTimeUTC=1 \
+                "-QuickTime:CreateDate=$timestamp_with_offset" \
+                "-QuickTime:ModifyDate=$timestamp_with_offset" \
+                "-QuickTime:TrackCreateDate=$timestamp_with_offset" \
+                "-QuickTime:TrackModifyDate=$timestamp_with_offset" \
+                "-QuickTime:MediaCreateDate=$timestamp_with_offset" \
+                "-QuickTime:MediaModifyDate=$timestamp_with_offset" \
+                "-Keys:CreationDate=$iso_timestamp_with_offset" \
+                "-XMP:CreateDate=$iso_timestamp_with_offset" \
+                "-XMP:ModifyDate=$iso_timestamp_with_offset" \
+                "$file" >/dev/null 2>&1; then
+                echo "[WARN] Unable to set embedded creation time for $file"
+            fi
+            ;;
+    esac
 }
 
 clean_extension() {
@@ -312,6 +373,7 @@ download_media_item() {
     local created_at=$6
     local url=$7
     local safe_id timestamp_fields filename_date touch_stamp setfile_date
+    local metadata_stamp iso_stamp timezone_offset_raw timezone_offset
     local base_name existing_file ext_guess temp_download header_file
     local sleep_time rand_jitter ext filename
 
@@ -320,10 +382,15 @@ download_media_item() {
     filename_date="unknown-date 0000"
     touch_stamp=""
     setfile_date=""
+    metadata_stamp=""
+    iso_stamp=""
+    timezone_offset_raw=""
+    timezone_offset=""
     temp_download=""
 
     if timestamp_fields=$(format_created_at "$created_at"); then
-        IFS='|' read -r filename_date touch_stamp setfile_date <<< "$timestamp_fields"
+        IFS='|' read -r filename_date touch_stamp setfile_date metadata_stamp iso_stamp timezone_offset_raw <<< "$timestamp_fields"
+        timezone_offset=$(colonize_timezone_offset "$timezone_offset_raw" || true)
     else
         echo "[WARN] $id has unparseable created_at: $created_at"
     fi
@@ -332,6 +399,7 @@ download_media_item() {
 
     if existing_file=$(find_existing_file "$output_dir" "$base_name"); then
         echo "[SKIP] $existing_file already exists."
+        set_embedded_media_times "$media" "$existing_file" "$metadata_stamp" "$iso_stamp" "$timezone_offset"
         set_file_times "$existing_file" "$touch_stamp" "$setfile_date"
         printf '2\n' > "$result_file"
         return 0
@@ -386,6 +454,7 @@ download_media_item() {
     filename="${output_dir}/${base_name}.${ext}"
     mv "$temp_download" "$filename"
     CURRENT_DOWNLOAD=""
+    set_embedded_media_times "$media" "$filename" "$metadata_stamp" "$iso_stamp" "$timezone_offset"
     set_file_times "$filename" "$touch_stamp" "$setfile_date"
     echo "[SUCCESS] Saved to $filename"
     printf '0\n' > "$result_file"
@@ -533,6 +602,11 @@ download_one_media_type() {
 }
 
 validate_selected_inputs
+
+EXIFTOOL_BIN=$(command -v exiftool 2>/dev/null || true)
+if [ -z "$EXIFTOOL_BIN" ]; then
+    echo "[WARN] exiftool not found; embedded photo/video creation metadata will not be written."
+fi
 
 if should_download_media photo; then
     download_one_media_type photo

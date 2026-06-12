@@ -117,6 +117,7 @@ If a download is interrupted, run the script again to continue where you left of
 - Use `-t` and `-j` with `download_media.sh` to throttle downloads.
 - Use `-P` or `--parallel` to control concurrent downloads.
 - The date range for both video and photo retrieval is configured via variables at the top of the respective list scripts.
-- Downloaded filenames use each item's `created_at` value so files sort chronologically by name.
-- On macOS, `download_media.sh` sets file creation time with `SetFile` when available and always tries to set modified time with `touch`.
+- Downloaded filenames use each item's `created_at` value, interpreted as Eastern time, so files sort chronologically by name.
+- When `exiftool` is available, `download_media.sh` writes embedded photo/video creation metadata from `created_at`, interpreted as Eastern time.
+- On macOS, `download_media.sh` sets filesystem creation time with `SetFile` when available and always tries to set modified time with `touch`.
 - Some media may be listed but ultimately fail to download because they have already been deleted from the backend. Failed downloads are not moved into `photos/` or `videos/`.
