@@ -6,7 +6,7 @@ A set of bash scripts to bulk download videos and photos from the Procare parent
 
 - **curl**: For making HTTP requests
 - **jq**: For JSON parsing (`brew install jq` on macOS)
-- **credentials.txt**: A file containing your Procare Bearer authentication token
+- **credentials.txt**: A file containing one Procare Bearer authentication token per line
 
 ## Setup
 
@@ -18,11 +18,13 @@ A set of bash scripts to bulk download videos and photos from the Procare parent
 4. Navigate to a page that loads media (e.g. https://schools.procareconnect.com/dashboard)
 5. Find a request to `api-school.procareconnect.com`
 6. Copy the value after `Bearer ` in the `Authorization` header
-7. Save this token to `credentials.txt` (no newline at the end)
+7. Save this token to `credentials.txt`, one credential per line. If your account has access to multiple schools, repeat the capture after switching the pinned school and add each school's token on its own line.
 
 ```bash
-echo -n "your_token_here" > credentials.txt
+printf '%s\n' "school_one_token_here" "school_two_token_here" > credentials.txt
 ```
+
+Anything after `#` on a credential line is treated as a comment.
 
 ## Usage
 
@@ -32,7 +34,7 @@ echo -n "your_token_here" > credentials.txt
 ./list_videos.sh
 ```
 
-This iterates through each month in the configured date range, fetching all videos and saving them to `raw_video_list_response.json`.
+This iterates through each credential and each month in the configured date range, fetching all videos and saving the merged result to `raw_video_list_response.json`.
 
 The date range is configured at the top of the script:
 ```bash
@@ -48,7 +50,7 @@ END_MONTH=8
 ./list_photos.sh
 ```
 
-This iterates through each month in the configured date range, fetching all photos and saving them to `raw_photo_list_response.json`.
+This iterates through each credential and each month in the configured date range, fetching all photos and saving the merged result to `raw_photo_list_response.json`.
 
 The date range is configured at the top of the script:
 ```bash
@@ -111,7 +113,7 @@ If a download is interrupted, run the script again to continue where you left of
 
 ## Notes
 
-- Authentication tokens expire periodically. If you receive authentication errors, obtain a new token.
+- Authentication tokens expire periodically. If you receive authentication errors, obtain a new token for each school and update each line in `credentials.txt`.
 - Use `-t` and `-j` with `download_media.sh` to throttle downloads.
 - Use `-P` or `--parallel` to control concurrent downloads.
 - The date range for both video and photo retrieval is configured via variables at the top of the respective list scripts.

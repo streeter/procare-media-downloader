@@ -8,7 +8,7 @@
 #   Results are merged into a single JSON file.
 #
 # Prerequisites:
-#   - credentials.txt: File containing the Bearer auth token (no newline)
+#   - credentials.txt: File containing one Bearer auth token per line
 #   - jq: Required for JSON parsing
 #   - curl: Required for API requests
 #
@@ -46,7 +46,35 @@ if [ ! -f "credentials.txt" ]; then
     echo "Error: credentials.txt not found."
     exit 1
 fi
-AUTH_TOKEN=$(cat credentials.txt | tr -d '\n')
+
+AUTH_TOKENS=()
+while IFS= read -r credential || [ -n "$credential" ]; do
+    credential=${credential%$'\r'}
+    credential=${credential%%#*}
+    credential=$(printf '%s' "$credential" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+
+    case "$credential" in
+        "")
+            continue
+            ;;
+        Bearer\ *)
+            credential=${credential#Bearer }
+            ;;
+        bearer\ *)
+            credential=${credential#bearer }
+            ;;
+    esac
+
+    credential=$(printf '%s' "$credential" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+    if [ -n "$credential" ]; then
+        AUTH_TOKENS+=("$credential")
+    fi
+done < credentials.txt
+
+if [ "${#AUTH_TOKENS[@]}" -eq 0 ]; then
+    echo "Error: credentials.txt does not contain any credentials."
+    exit 1
+fi
 
 # Create a unique temp directory for this run so concurrent list scripts do not
 # delete or merge each other's page files.
@@ -71,8 +99,9 @@ get_last_day() {
 
 # Function to make API call with throttling
 fetch_page() {
-    local url=$1
-    local output_file=$2
+    local auth_token=$1
+    local url=$2
+    local output_file=$3
 
     # Throttling with jitter
     if [ "$JITTER" -gt 0 ]; then
@@ -89,104 +118,112 @@ fetch_page() {
 
     curl -s "$url" \
       -H 'Accept: application/json' \
-      -H "Authorization: Bearer $AUTH_TOKEN" \
+      -H "Authorization: Bearer $auth_token" \
       -H 'history-data: 1' \
       -o "$output_file"
 }
 
 echo "Starting photo list retrieval (month by month)..."
 echo "Date range: ${START_YEAR}-$(printf "%02d" $START_MONTH) to ${END_YEAR}-$(printf "%02d" $END_MONTH)"
+echo "Credentials: ${#AUTH_TOKENS[@]}"
 echo "Throttle: ${THROTTLE}s base + ${JITTER}s max jitter"
 echo ""
 
-CURRENT_YEAR=$START_YEAR
-CURRENT_MONTH=$START_MONTH
+for ((credential_index = 0; credential_index < ${#AUTH_TOKENS[@]}; credential_index++)); do
+    AUTH_TOKEN=${AUTH_TOKENS[$credential_index]}
+    CREDENTIAL_NUMBER=$((credential_index + 1))
+    echo "=== Credential ${CREDENTIAL_NUMBER}/${#AUTH_TOKENS[@]} ==="
 
-while true; do
-    # Check if we've passed the end date
-    if [ "$CURRENT_YEAR" -gt "$END_YEAR" ]; then
-        echo "Reached end year $END_YEAR."
-        break
-    fi
-    if [ "$CURRENT_YEAR" -eq "$END_YEAR" ] && [ "$CURRENT_MONTH" -gt "$END_MONTH" ]; then
-        echo "Reached end month ${END_YEAR}-$(printf "%02d" $END_MONTH)."
-        break
-    fi
-
-    # Format month with leading zero
-    MONTH_PADDED=$(printf "%02d" $CURRENT_MONTH)
-    LAST_DAY=$(get_last_day $CURRENT_YEAR $CURRENT_MONTH)
-
-    # URL-encoded date range for this month
-    DATE_FROM="${CURRENT_YEAR}-${MONTH_PADDED}-01%2000%3A00"
-    DATE_TO="${CURRENT_YEAR}-${MONTH_PADDED}-${LAST_DAY}%2023%3A59"
-
-    echo "=== Fetching ${CURRENT_YEAR}-${MONTH_PADDED} ==="
-
-    PAGE=1
-    MONTH_PHOTO_COUNT=0
-    MONTH_EXPECTED_COUNT=0
+    CURRENT_YEAR=$START_YEAR
+    CURRENT_MONTH=$START_MONTH
 
     while true; do
-        echo "  Fetching page $PAGE..."
-
-        URL="${BASE_URL}?page=${PAGE}&filters%5Bphoto%5D%5Bdatetime_from%5D=${DATE_FROM}&filters%5Bphoto%5D%5Bdatetime_to%5D=${DATE_TO}"
-
-        FILE_INDEX=$((FILE_INDEX + 1))
-        CURRENT_PAGE_FILE="${TEMP_DIR}/page_$(printf "%05d" $FILE_INDEX).json"
-
-        # Check curl exit code
-        if ! fetch_page "$URL" "$CURRENT_PAGE_FILE"; then
-            echo "  Error: Curl command failed for page $PAGE."
-            rm -f "$CURRENT_PAGE_FILE"
+        # Check if we've passed the end date
+        if [ "$CURRENT_YEAR" -gt "$END_YEAR" ]; then
+            echo "Reached end year $END_YEAR."
             break
         fi
-        TOTAL_API_CALLS=$((TOTAL_API_CALLS + 1))
-
-        # Validate JSON response
-        if ! jq -e . "$CURRENT_PAGE_FILE" >/dev/null 2>&1; then
-            echo "  Error: Invalid JSON response on page $PAGE."
-            cat "$CURRENT_PAGE_FILE"
-            rm -f "$CURRENT_PAGE_FILE"
+        if [ "$CURRENT_YEAR" -eq "$END_YEAR" ] && [ "$CURRENT_MONTH" -gt "$END_MONTH" ]; then
+            echo "Reached end month ${END_YEAR}-$(printf "%02d" $END_MONTH)."
             break
         fi
 
-        PHOTO_COUNT=$(jq '.photos | length' "$CURRENT_PAGE_FILE")
+        # Format month with leading zero
+        MONTH_PADDED=$(printf "%02d" $CURRENT_MONTH)
+        LAST_DAY=$(get_last_day $CURRENT_YEAR $CURRENT_MONTH)
 
-        # Get expected total from first page of each month
-        if [ "$PAGE" -eq 1 ]; then
-            MONTH_EXPECTED_COUNT=$(jq '.total // 0' "$CURRENT_PAGE_FILE")
-            echo "  Expected photos for this month: $MONTH_EXPECTED_COUNT"
+        # URL-encoded date range for this month
+        DATE_FROM="${CURRENT_YEAR}-${MONTH_PADDED}-01%2000%3A00"
+        DATE_TO="${CURRENT_YEAR}-${MONTH_PADDED}-${LAST_DAY}%2023%3A59"
+
+        echo "=== Fetching ${CURRENT_YEAR}-${MONTH_PADDED} for credential ${CREDENTIAL_NUMBER}/${#AUTH_TOKENS[@]} ==="
+
+        PAGE=1
+        MONTH_PHOTO_COUNT=0
+        MONTH_EXPECTED_COUNT=0
+
+        while true; do
+            echo "  Fetching page $PAGE..."
+
+            URL="${BASE_URL}?page=${PAGE}&filters%5Bphoto%5D%5Bdatetime_from%5D=${DATE_FROM}&filters%5Bphoto%5D%5Bdatetime_to%5D=${DATE_TO}"
+
+            FILE_INDEX=$((FILE_INDEX + 1))
+            CURRENT_PAGE_FILE="${TEMP_DIR}/page_$(printf "%05d" $FILE_INDEX).json"
+
+            # Check curl exit code
+            if ! fetch_page "$AUTH_TOKEN" "$URL" "$CURRENT_PAGE_FILE"; then
+                echo "  Error: Curl command failed for page $PAGE."
+                rm -f "$CURRENT_PAGE_FILE"
+                break
+            fi
+            TOTAL_API_CALLS=$((TOTAL_API_CALLS + 1))
+
+            # Validate JSON response
+            if ! jq -e . "$CURRENT_PAGE_FILE" >/dev/null 2>&1; then
+                echo "  Error: Invalid JSON response on page $PAGE."
+                cat "$CURRENT_PAGE_FILE"
+                rm -f "$CURRENT_PAGE_FILE"
+                break
+            fi
+
+            PHOTO_COUNT=$(jq '.photos | length' "$CURRENT_PAGE_FILE")
+
+            # Get expected total from first page of each month
+            if [ "$PAGE" -eq 1 ]; then
+                MONTH_EXPECTED_COUNT=$(jq '.total // 0' "$CURRENT_PAGE_FILE")
+                echo "  Expected photos for this month: $MONTH_EXPECTED_COUNT"
+            fi
+
+            # If no photos on this page, we're done with this month
+            if [ "$PHOTO_COUNT" -eq 0 ]; then
+                echo "  No more photos on page $PAGE."
+                rm "$CURRENT_PAGE_FILE"
+                break
+            fi
+
+            MONTH_PHOTO_COUNT=$((MONTH_PHOTO_COUNT + PHOTO_COUNT))
+            echo "  Found $PHOTO_COUNT photos (month total: $MONTH_PHOTO_COUNT)"
+
+            PAGE=$((PAGE + 1))
+        done
+
+        ACTUAL_PHOTO_COUNT=$((ACTUAL_PHOTO_COUNT + MONTH_PHOTO_COUNT))
+        EXPECTED_PHOTO_COUNT=$((EXPECTED_PHOTO_COUNT + MONTH_EXPECTED_COUNT))
+        echo "  Month ${CURRENT_YEAR}-${MONTH_PADDED} complete: $MONTH_PHOTO_COUNT / $MONTH_EXPECTED_COUNT photos"
+        echo ""
+
+        # Advance to next month
+        CURRENT_MONTH=$((CURRENT_MONTH + 1))
+        if [ "$CURRENT_MONTH" -gt 12 ]; then
+            CURRENT_MONTH=1
+            CURRENT_YEAR=$((CURRENT_YEAR + 1))
         fi
-
-        # If no photos on this page, we're done with this month
-        if [ "$PHOTO_COUNT" -eq 0 ]; then
-            echo "  No more photos on page $PAGE."
-            rm "$CURRENT_PAGE_FILE"
-            break
-        fi
-
-        MONTH_PHOTO_COUNT=$((MONTH_PHOTO_COUNT + PHOTO_COUNT))
-        echo "  Found $PHOTO_COUNT photos (month total: $MONTH_PHOTO_COUNT)"
-
-        PAGE=$((PAGE + 1))
     done
-
-    ACTUAL_PHOTO_COUNT=$((ACTUAL_PHOTO_COUNT + MONTH_PHOTO_COUNT))
-    EXPECTED_PHOTO_COUNT=$((EXPECTED_PHOTO_COUNT + MONTH_EXPECTED_COUNT))
-    echo "  Month ${CURRENT_YEAR}-${MONTH_PADDED} complete: $MONTH_PHOTO_COUNT / $MONTH_EXPECTED_COUNT photos"
-    echo ""
-
-    # Advance to next month
-    CURRENT_MONTH=$((CURRENT_MONTH + 1))
-    if [ "$CURRENT_MONTH" -gt 12 ]; then
-        CURRENT_MONTH=1
-        CURRENT_YEAR=$((CURRENT_YEAR + 1))
-    fi
 done
 
 echo ""
 echo "---------------- Summary ----------------"
+echo "Credentials Processed:   ${#AUTH_TOKENS[@]}"
 echo "Expected Photos:         $EXPECTED_PHOTO_COUNT"
 echo "Actual Photos Retrieved: $ACTUAL_PHOTO_COUNT"
 echo "Total API Calls:         $TOTAL_API_CALLS"
