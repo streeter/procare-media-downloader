@@ -28,13 +28,13 @@ Anything after `#` on a credential line is treated as a comment.
 
 ## Usage
 
-### Listing Videos
+### Listing Media
 
 ```bash
-./list_videos.sh
+./list_media.sh
 ```
 
-This iterates through each credential and each month in the configured date range, fetching all videos and saving the merged result to `raw_video_list_response.json`.
+This iterates through each credential and each month in the configured date range, fetching all videos and photos and saving the merged results to `raw_video_list_response.json` and `raw_photo_list_response.json`.
 
 The date range is configured at the top of the script:
 ```bash
@@ -44,21 +44,7 @@ END_YEAR=2026
 END_MONTH=8
 ```
 
-### Listing Photos
-
-```bash
-./list_photos.sh
-```
-
-This iterates through each credential and each month in the configured date range, fetching all photos and saving the merged result to `raw_photo_list_response.json`.
-
-The date range is configured at the top of the script:
-```bash
-START_YEAR=2023
-START_MONTH=1
-END_YEAR=2026
-END_MONTH=8
-```
+Use `-m photo` or `-m video` to list only one media type. Use `-h` to show the script help.
 
 ### Downloading Media
 
@@ -116,7 +102,7 @@ If a download is interrupted, run the script again to continue where you left of
 - Authentication tokens expire periodically. If you receive authentication errors, obtain a new token for each school and update each line in `credentials.txt`.
 - Use `-t` and `-j` with `download_media.sh` to throttle downloads.
 - Use `-P` or `--parallel` to control concurrent downloads.
-- The date range for both video and photo retrieval is configured via variables at the top of the respective list scripts.
+- The date range for both video and photo retrieval is configured via variables at the top of `list_media.sh`.
 - Downloaded filenames use each item's `created_at` value, interpreted as Eastern time, so files sort chronologically by name.
 - When `exiftool` is available, `download_media.sh` writes embedded photo/video creation metadata from `created_at`, interpreted as Eastern time.
 - On macOS, `download_media.sh` sets filesystem creation time with `SetFile` when available and always tries to set modified time with `touch`.

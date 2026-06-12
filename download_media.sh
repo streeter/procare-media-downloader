@@ -3,8 +3,8 @@
 # download_media.sh - Download photos and videos from Procare media lists
 #
 # Description:
-#   Downloads photo and video files from the JSON outputs of list_photos.sh and
-#   list_videos.sh. Supports throttling, jitter, resumable downloads, and safe
+#   Downloads photo and video files from the JSON outputs of list_media.sh.
+#   Supports throttling, jitter, resumable downloads, and safe
 #   interrupted downloads.
 #
 # Prerequisites:
