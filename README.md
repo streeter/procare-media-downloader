@@ -42,14 +42,14 @@ DEFAULT_START_DATE="2023-01-01"
 DEFAULT_END_DATE="2026-08-31"
 ```
 
-Use `-s YYYY-MM-DD` to pass a different start date and `-e YYYY-MM-DD` to pass a different end date:
+Use `-s YYYY-MM-DD` or `--start-date YYYY-MM-DD` to pass a different start date, and `-e YYYY-MM-DD` or `--end-date YYYY-MM-DD` to pass a different end date:
 
 ```bash
 ./list_media.sh -s 2024-01-15
-./list_media.sh -s 2024-01-15 -e 2024-12-31
+./list_media.sh --start-date 2024-01-15 --end-date 2024-12-31
 ```
 
-Use `-m photo` or `-m video` to list only one media type. Use `-h` to show the script help.
+Use `-m photo`, `--media photo`, `-m video`, or `--media video` to list only one media type. Use `-h` or `--help` to show the script help.
 
 ### Downloading Media
 
@@ -66,13 +66,13 @@ Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-n <limit>` | Number of each media type to download (0 = all) | 0 |
-| `-t <seconds>` | Base sleep time between downloads | 0 |
-| `-j <seconds>` | Max random jitter added to sleep | 0 |
-| `-p <file>` | Photo input JSON file | raw_photo_list_response.json |
-| `-v <file>` | Video input JSON file | raw_video_list_response.json |
-| `-m <media>` | Media to download: `all`, `photo`, or `video` | all |
-| `-P`, `--parallel <count>` | Parallel downloads per media type | 4 |
+| `-n`, `--limit <limit>` | Number of each media type to download (0 = all) | 0 |
+| `-t`, `--throttle <seconds>` | Base sleep time between downloads | 0 |
+| `-j`, `--jitter <seconds>` | Max random jitter added to sleep | 0 |
+| `-p`, `--photo-input <file>` | Photo input JSON file | raw_photo_list_response.json |
+| `-v`, `--video-input <file>` | Video input JSON file | raw_video_list_response.json |
+| `-m`, `--media <media>` | Media to download: `all`, `photo`, or `video` | all |
+| `-P`, `--parallel <count>` | Parallel downloads per media type | 16 |
 | `-h`, `--help` | Show usage help | n/a |
 
 **Examples:**
@@ -80,7 +80,7 @@ Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 ```bash
 ./download_media.sh -n 10        # Download first 10 photos and first 10 videos
 ./download_media.sh -t 5 -j 3    # Custom throttling
-./download_media.sh -m photo     # Download photos only
+./download_media.sh --media photo # Download photos only
 ./download_media.sh -P 8         # Run up to 8 downloads at a time
 ```
 
@@ -105,7 +105,7 @@ If a download is interrupted, run the script again to continue where you left of
 ## Notes
 
 - Authentication tokens expire periodically. If you receive authentication errors, obtain a new token for each school and update each line in `credentials.txt`.
-- Use `-t` and `-j` with `download_media.sh` to throttle downloads.
+- Use `-t`/`--throttle` and `-j`/`--jitter` with `download_media.sh` to throttle downloads.
 - Use `-P` or `--parallel` to control concurrent downloads.
 - Shared defaults and validation helpers live in `media_common.sh` so listing and downloading stay in sync.
 - Downloaded filenames use each item's `created_at` value, interpreted as Eastern time, so files sort chronologically by name.

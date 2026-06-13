@@ -22,6 +22,7 @@
 # Usage:
 #   ./list_media.sh
 #   ./list_media.sh -s 2024-01-15
+#   ./list_media.sh --start-date 2024-01-15
 #   ./list_media.sh -m photo
 #   ./list_media.sh -m video
 #   ./list_media.sh -h
@@ -56,17 +57,17 @@ trap cleanup EXIT
 
 usage() {
     cat <<EOF
-Usage: $0 [-s YYYY-MM-DD] [-e YYYY-MM-DD] [-m all|photo|video] [-t throttle_sec] [-j jitter_sec] [-h]
+Usage: $0 [-s|--start-date YYYY-MM-DD] [-e|--end-date YYYY-MM-DD] [-m|--media all|photo|video] [-t|--throttle throttle_sec] [-j|--jitter jitter_sec] [-h|--help]
 
 Fetch paginated Procare media lists into JSON files.
 
 Options:
-  -s: Start date to list from (default: $DEFAULT_START_DATE)
-  -e: End date to list through (default: $DEFAULT_END_DATE)
-  -m: Media to list: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)
-  -t: Base sleep time between API calls (default: $DEFAULT_LIST_THROTTLE)
-  -j: Max random jitter added to sleep (default: $DEFAULT_LIST_JITTER)
-  -h: Show this help message
+  -s, --start-date: Start date to list from (default: $DEFAULT_START_DATE)
+  -e, --end-date: End date to list through (default: $DEFAULT_END_DATE)
+  -m, --media: Media to list: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)
+  -t, --throttle: Base sleep time between API calls (default: $DEFAULT_LIST_THROTTLE)
+  -j, --jitter: Max random jitter added to sleep (default: $DEFAULT_LIST_JITTER)
+  -h, --help: Show this help message
 
 Outputs:
   photo: $DEFAULT_PHOTO_LIST_FILE
@@ -74,6 +75,87 @@ Outputs:
 EOF
     exit "${1:-1}"
 }
+
+ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --start-date)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --start-date requires a value"
+                exit 1
+            fi
+            ARGS+=("-s" "$1")
+            ;;
+        --start-date=*)
+            ARGS+=("-s" "${1#*=}")
+            ;;
+        --end-date)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --end-date requires a value"
+                exit 1
+            fi
+            ARGS+=("-e" "$1")
+            ;;
+        --end-date=*)
+            ARGS+=("-e" "${1#*=}")
+            ;;
+        --media)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --media requires a value"
+                exit 1
+            fi
+            ARGS+=("-m" "$1")
+            ;;
+        --media=*)
+            ARGS+=("-m" "${1#*=}")
+            ;;
+        --throttle)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --throttle requires a value"
+                exit 1
+            fi
+            ARGS+=("-t" "$1")
+            ;;
+        --throttle=*)
+            ARGS+=("-t" "${1#*=}")
+            ;;
+        --jitter)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --jitter requires a value"
+                exit 1
+            fi
+            ARGS+=("-j" "$1")
+            ;;
+        --jitter=*)
+            ARGS+=("-j" "${1#*=}")
+            ;;
+        --help)
+            usage 0
+            ;;
+        --)
+            shift
+            while [ "$#" -gt 0 ]; do
+                ARGS+=("$1")
+                shift
+            done
+            break
+            ;;
+        --*)
+            echo "Error: unknown option: $1"
+            usage
+            ;;
+        *)
+            ARGS+=("$1")
+            ;;
+    esac
+    shift
+done
+set -- "${ARGS[@]}"
 
 while getopts "s:e:m:t:j:h" opt; do
     case "$opt" in
@@ -93,14 +175,14 @@ if [ "$#" -gt 0 ]; then
     usage
 fi
 
-validate_media_selection "$MEDIA_SELECTION" "-m" || exit 1
-validate_non_negative_integer "-t" "$THROTTLE" || exit 1
-validate_non_negative_integer "-j" "$JITTER" || exit 1
-validate_yyyy_mm_dd_date "-s" "$START_DATE" || exit 1
-validate_yyyy_mm_dd_date "-e" "$END_DATE" || exit 1
+validate_media_selection "$MEDIA_SELECTION" "-m/--media" || exit 1
+validate_non_negative_integer "-t/--throttle" "$THROTTLE" || exit 1
+validate_non_negative_integer "-j/--jitter" "$JITTER" || exit 1
+validate_yyyy_mm_dd_date "-s/--start-date" "$START_DATE" || exit 1
+validate_yyyy_mm_dd_date "-e/--end-date" "$END_DATE" || exit 1
 
 if [ "${START_DATE//-/}" -gt "${END_DATE//-/}" ]; then
-    echo "Error: -s must be on or before -e"
+    echo "Error: --start-date must be on or before --end-date"
     exit 1
 fi
 

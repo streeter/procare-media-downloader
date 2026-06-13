@@ -18,17 +18,18 @@
 #   - videos/YYYY-MM-DD HHMM <video-id>.<ext>: Downloaded video files
 #
 # Options:
-#   -n <limit>    Number of each media type to download (0 = all, default: 0)
-#   -t <seconds>  Base sleep time between downloads (default: 0)
-#   -j <seconds>  Max random jitter added to sleep (default: 0)
-#   -p <file>     Photo input JSON file (default: raw_photo_list_response.json)
-#   -v <file>     Video input JSON file (default: raw_video_list_response.json)
-#   -m <media>    Media to download: all, photo, or video (default: all)
-#   -P <count>    Parallel downloads per media type (default: 4)
+#   -n, --limit <limit>          Number of each media type to download (0 = all, default: 0)
+#   -t, --throttle <seconds>     Base sleep time between downloads (default: 0)
+#   -j, --jitter <seconds>       Max random jitter added to sleep (default: 0)
+#   -p, --photo-input <file>     Photo input JSON file (default: raw_photo_list_response.json)
+#   -v, --video-input <file>     Video input JSON file (default: raw_video_list_response.json)
+#   -m, --media <media>          Media to download: all, photo, or video (default: all)
+#   -P, --parallel <count>       Parallel downloads per media type (default: 16)
 #
 # Usage:
 #   ./download_media.sh
 #   ./download_media.sh -n 10
+#   ./download_media.sh --limit 10
 #   ./download_media.sh -t 5 -j 3
 #   ./download_media.sh -m photo -p custom_photos.json
 #   ./download_media.sh -P 8
@@ -55,13 +56,13 @@ BATCH_DOWNLOADED=0
 FAILED_DOWNLOADS=0
 
 usage() {
-    echo "Usage: $0 [-n limit] [-t throttle_sec] [-j jitter_sec] [-p photo_input] [-v video_input] [-m all|photo|video] [-P parallel]"
-    echo "  -n: Number of each media type to download (default: $DEFAULT_DOWNLOAD_LIMIT = all)"
-    echo "  -t: Base sleep time between downloads (default: $DEFAULT_DOWNLOAD_THROTTLE)"
-    echo "  -j: Max random jitter time added to sleep (default: $DEFAULT_DOWNLOAD_JITTER)"
-    echo "  -p: Photo input JSON file (default: $DEFAULT_PHOTO_LIST_FILE)"
-    echo "  -v: Video input JSON file (default: $DEFAULT_VIDEO_LIST_FILE)"
-    echo "  -m: Media to download: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)"
+    echo "Usage: $0 [-n|--limit limit] [-t|--throttle throttle_sec] [-j|--jitter jitter_sec] [-p|--photo-input photo_input] [-v|--video-input video_input] [-m|--media all|photo|video] [-P|--parallel parallel]"
+    echo "  -n, --limit: Number of each media type to download (default: $DEFAULT_DOWNLOAD_LIMIT = all)"
+    echo "  -t, --throttle: Base sleep time between downloads (default: $DEFAULT_DOWNLOAD_THROTTLE)"
+    echo "  -j, --jitter: Max random jitter time added to sleep (default: $DEFAULT_DOWNLOAD_JITTER)"
+    echo "  -p, --photo-input: Photo input JSON file (default: $DEFAULT_PHOTO_LIST_FILE)"
+    echo "  -v, --video-input: Video input JSON file (default: $DEFAULT_VIDEO_LIST_FILE)"
+    echo "  -m, --media: Media to download: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)"
     echo "  -P, --parallel: Parallel downloads per media type (default: $DEFAULT_PARALLEL_DOWNLOADS)"
     echo "  -h, --help: Show this help message"
     exit "${1:-1}"
@@ -70,6 +71,72 @@ usage() {
 ARGS=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --limit)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --limit requires a value"
+                exit 1
+            fi
+            ARGS+=("-n" "$1")
+            ;;
+        --limit=*)
+            ARGS+=("-n" "${1#*=}")
+            ;;
+        --throttle)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --throttle requires a value"
+                exit 1
+            fi
+            ARGS+=("-t" "$1")
+            ;;
+        --throttle=*)
+            ARGS+=("-t" "${1#*=}")
+            ;;
+        --jitter)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --jitter requires a value"
+                exit 1
+            fi
+            ARGS+=("-j" "$1")
+            ;;
+        --jitter=*)
+            ARGS+=("-j" "${1#*=}")
+            ;;
+        --photo-input)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --photo-input requires a value"
+                exit 1
+            fi
+            ARGS+=("-p" "$1")
+            ;;
+        --photo-input=*)
+            ARGS+=("-p" "${1#*=}")
+            ;;
+        --video-input)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --video-input requires a value"
+                exit 1
+            fi
+            ARGS+=("-v" "$1")
+            ;;
+        --video-input=*)
+            ARGS+=("-v" "${1#*=}")
+            ;;
+        --media)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --media requires a value"
+                exit 1
+            fi
+            ARGS+=("-m" "$1")
+            ;;
+        --media=*)
+            ARGS+=("-m" "${1#*=}")
+            ;;
         --parallel)
             shift
             if [ "$#" -eq 0 ]; then
@@ -91,6 +158,10 @@ while [ "$#" -gt 0 ]; do
                 shift
             done
             break
+            ;;
+        --*)
+            echo "Error: unknown option: $1"
+            usage
             ;;
         *)
             ARGS+=("$1")
@@ -114,11 +185,18 @@ while getopts "n:t:j:p:v:m:P:h" opt; do
     esac
 done
 
-validate_non_negative_integer "-n" "$LIMIT" || exit 1
-validate_non_negative_integer "-t" "$THROTTLE" || exit 1
-validate_non_negative_integer "-j" "$JITTER" || exit 1
+shift $((OPTIND - 1))
+
+if [ "$#" -gt 0 ]; then
+    echo "Error: unexpected argument: $1"
+    usage
+fi
+
+validate_non_negative_integer "-n/--limit" "$LIMIT" || exit 1
+validate_non_negative_integer "-t/--throttle" "$THROTTLE" || exit 1
+validate_non_negative_integer "-j/--jitter" "$JITTER" || exit 1
 validate_positive_integer "-P/--parallel" "$PARALLEL_DOWNLOADS" || exit 1
-validate_media_selection "$MEDIA_SELECTION" "-m" || exit 1
+validate_media_selection "$MEDIA_SELECTION" "-m/--media" || exit 1
 
 TEMP_DIR=$(mktemp -d)
 CURRENT_DOWNLOAD=""
