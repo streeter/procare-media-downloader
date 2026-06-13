@@ -106,7 +106,9 @@ Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 ./download_media.sh -P 8         # Run up to 8 downloads at a time
 ```
 
-When a download URL returns HTTP 403, the downloader records the media ID, media type, URL field, timestamp, and URL in `failed_media_downloads.jsonl`. After refreshing credentials, ask the list script to re-fetch the months containing those failed IDs and merge any refreshed records back into the normal raw JSON files:
+When a photo download URL returns HTTP 403, the downloader tries the other available photo sizes in order: `main_url`, `medium_url`, then `thumb_url`. Duplicate URLs are skipped. Each 403 URL is recorded with the media ID, media type, URL field, timestamp, and URL in `failed_media_downloads.jsonl`.
+
+After refreshing credentials, ask the list script to re-fetch the months containing those failed IDs and merge any refreshed records back into the normal raw JSON files:
 
 ```bash
 ./list_media.sh --retry-failed-downloads

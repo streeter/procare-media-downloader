@@ -289,6 +289,17 @@ print_parallel_download_error() {
     rmdir "$LOG_LOCK_DIR"
 }
 
+print_parallel_log_line() {
+    local message=$1
+
+    while ! mkdir "$LOG_LOCK_DIR" 2>/dev/null; do
+        sleep 0.05
+    done
+
+    printf '%s\n' "$message"
+    rmdir "$LOG_LOCK_DIR"
+}
+
 http_status_from_headers() {
     local headers_file=$1
 
@@ -772,6 +783,9 @@ verify_or_repair_existing_media_metadata() {
     local touch_stamp=$6
     local setfile_date=$7
 
+    normalize_media_extension "$file"
+    file=$NORMALIZED_MEDIA_FILE
+
     if [ -z "$EXIFTOOL_BIN" ] || ! has_expected_embedded_media_metadata "$metadata_stamp" "$timezone_offset"; then
         echo "[SKIP] $file already exists."
         return 0
@@ -799,6 +813,26 @@ clean_extension() {
         printf '%s' "$ext"
         return 0
     fi
+
+    return 1
+}
+
+extension_from_content_type() {
+    local content_type=$1
+
+    case "$content_type" in
+        image/jpeg|image/jpg) printf 'jpg'; return 0 ;;
+        image/png) printf 'png'; return 0 ;;
+        image/gif) printf 'gif'; return 0 ;;
+        image/heic) printf 'heic'; return 0 ;;
+        image/heif) printf 'heif'; return 0 ;;
+        image/webp) printf 'webp'; return 0 ;;
+        video/mp4) printf 'mp4'; return 0 ;;
+        video/quicktime) printf 'mov'; return 0 ;;
+        video/webm) printf 'webm'; return 0 ;;
+        video/x-m4v) printf 'm4v'; return 0 ;;
+        video/x-msvideo) printf 'avi'; return 0 ;;
+    esac
 
     return 1
 }
@@ -836,21 +870,63 @@ extension_from_headers() {
     fi
 
     content_type=$(awk 'BEGIN{IGNORECASE=1} /^Content-Type:/ {line=$0} END{sub(/\r$/, "", line); sub(/^[^:]+:[[:space:]]*/, "", line); sub(/;.*/, "", line); print tolower(line)}' "$headers_file")
-    case "$content_type" in
-        image/jpeg|image/jpg) printf 'jpg'; return 0 ;;
-        image/png) printf 'png'; return 0 ;;
-        image/gif) printf 'gif'; return 0 ;;
-        image/heic) printf 'heic'; return 0 ;;
-        image/heif) printf 'heif'; return 0 ;;
-        image/webp) printf 'webp'; return 0 ;;
-        video/mp4) printf 'mp4'; return 0 ;;
-        video/quicktime) printf 'mov'; return 0 ;;
-        video/webm) printf 'webm'; return 0 ;;
-        video/x-m4v) printf 'm4v'; return 0 ;;
-        video/x-msvideo) printf 'avi'; return 0 ;;
-    esac
+    if extension_from_content_type "$content_type"; then
+        return 0
+    fi
 
     return 1
+}
+
+extension_from_file() {
+    local file=$1
+    local content_type ext
+
+    if command -v file >/dev/null 2>&1; then
+        content_type=$(file -b --mime-type "$file" 2>/dev/null || true)
+        if extension_from_content_type "$content_type"; then
+            return 0
+        fi
+    fi
+
+    if [ -n "$EXIFTOOL_BIN" ]; then
+        ext=$("$EXIFTOOL_BIN" -s3 -FileTypeExtension "$file" 2>/dev/null || true)
+        if clean_extension "$ext"; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+normalize_media_extension() {
+    local file=$1
+    local actual_ext current_ext target
+
+    NORMALIZED_MEDIA_FILE=$file
+
+    if ! actual_ext=$(extension_from_file "$file"); then
+        return 0
+    fi
+
+    current_ext=${file##*.}
+    current_ext=$(clean_extension "$current_ext" || true)
+
+    if [ "$actual_ext" = "$current_ext" ]; then
+        return 0
+    fi
+
+    target="${file%.*}.${actual_ext}"
+    if [ -e "$target" ]; then
+        print_parallel_log_line "[WARN] $file is detected as .$actual_ext, but $target already exists; leaving name unchanged."
+        return 0
+    fi
+
+    if mv "$file" "$target"; then
+        print_parallel_log_line "[REPAIR] Renamed $file to $target to match detected media type."
+        NORMALIZED_MEDIA_FILE=$target
+    else
+        print_parallel_log_line "[WARN] Unable to rename $file to .$actual_ext; leaving name unchanged."
+    fi
 }
 
 find_existing_file() {
@@ -904,12 +980,14 @@ download_media_item() {
     local default_extension=$4
     local id=$5
     local created_at=$6
-    local url_field=$7
-    local url=$8
+    shift 6
+    local -a candidate_fields=()
+    local -a candidate_urls=()
     local safe_id timestamp_fields filename_date touch_stamp setfile_date
     local metadata_stamp iso_stamp timezone_offset_raw timezone_offset
     local base_name existing_file ext_guess temp_download header_file curl_error_file
-    local ext filename http_status
+    local ext filename http_status url_field url
+    local attempt candidate_count success_status
 
     safe_id=$(sanitize_component "$id")
     timestamp_fields=""
@@ -922,6 +1000,21 @@ download_media_item() {
     timezone_offset=""
     temp_download=""
     curl_error_file=""
+    ext_guess=$default_extension
+    success_status=1
+
+    while [ "$#" -gt 0 ]; do
+        if [ "$#" -lt 2 ]; then
+            echo "[ERROR] Internal error: URL candidate for $id is missing a value"
+            printf '1\n' > "$result_file"
+            return 0
+        fi
+
+        candidate_fields+=("$1")
+        candidate_urls+=("$2")
+        shift 2
+    done
+    candidate_count=${#candidate_urls[@]}
 
     if timestamp_fields=$(format_created_at "$created_at"); then
         IFS='|' read -r filename_date touch_stamp setfile_date metadata_stamp iso_stamp timezone_offset_raw <<< "$timestamp_fields"
@@ -938,7 +1031,12 @@ download_media_item() {
         return 0
     fi
 
-    ext_guess=$(extension_from_url "$url" "$default_extension")
+    if [ "$candidate_count" -eq 0 ]; then
+        echo "[SKIP] $id has no download URL."
+        printf '2\n' > "$result_file"
+        return 0
+    fi
+
     temp_download=$(mktemp "${output_dir}/.${safe_id}.${RUN_ID}.download.XXXXXX")
     CURRENT_DOWNLOAD=$temp_download
     header_file=$(mktemp "${TEMP_DIR}/${media}-${safe_id}.headers.XXXXXX")
@@ -946,34 +1044,48 @@ download_media_item() {
 
     sleep_with_jitter "$THROTTLE" "$JITTER" "Sleeping for " "s before ${base_name}..."
 
-    echo "[DOWNLOADING] ${base_name}..."
-    if [ "$PARALLEL_DOWNLOADS" -gt 1 ]; then
+    for ((attempt = 0; attempt < candidate_count; attempt++)); do
+        url_field=${candidate_fields[$attempt]}
+        url=${candidate_urls[$attempt]}
+        ext_guess=$(extension_from_url "$url" "$default_extension")
+
+        : > "$header_file"
+        : > "$curl_error_file"
+        rm -f "$temp_download"
+
+        if [ "$attempt" -eq 0 ]; then
+            echo "[DOWNLOADING] ${base_name}..."
+        else
+            echo "[DOWNLOADING] ${base_name} (${url_field})..."
+        fi
+
         if curl --fail --silent --show-error -L -D "$header_file" -o "$temp_download" "$url" 2>"$curl_error_file"; then
-            :
-        else
-            http_status=$(http_status_from_headers "$header_file")
-            record_failed_download "$media" "$id" "$created_at" "$url_field" "$http_status" "$url"
-            print_parallel_download_error "$curl_error_file" "$id"
-            rm -f "$temp_download"
-            CURRENT_DOWNLOAD=""
-            printf '1\n' > "$result_file"
-            return 0
+            success_status=0
+            break
         fi
-    else
-        if curl --fail -# -L -D "$header_file" -o "$temp_download" "$url"; then
-            :
-        else
-            http_status=$(http_status_from_headers "$header_file")
-            record_failed_download "$media" "$id" "$created_at" "$url_field" "$http_status" "$url"
-            echo "[ERROR] Failed to download $id"
-            rm -f "$temp_download"
-            CURRENT_DOWNLOAD=""
-            printf '1\n' > "$result_file"
-            return 0
+
+        http_status=$(http_status_from_headers "$header_file")
+        record_failed_download "$media" "$id" "$created_at" "$url_field" "$http_status" "$url"
+
+        if [ "$http_status" = 403 ] && [ $((attempt + 1)) -lt "$candidate_count" ]; then
+            print_parallel_log_line "[WARN] $id $url_field returned HTTP 403; trying ${candidate_fields[$((attempt + 1))]}."
+            continue
         fi
+
+        break
+    done
+
+    if [ "$success_status" -ne 0 ]; then
+        print_parallel_download_error "$curl_error_file" "$id"
+        rm -f "$temp_download"
+        CURRENT_DOWNLOAD=""
+        printf '1\n' > "$result_file"
+        return 0
     fi
 
-    if ext=$(extension_from_headers "$header_file"); then
+    if ext=$(extension_from_file "$temp_download"); then
+        :
+    elif ext=$(extension_from_headers "$header_file"); then
         :
     else
         ext=$ext_guess
@@ -1042,9 +1154,12 @@ download_one_media_type() {
     local media=$1
     local media_collection
     local output_dir
-    local input_file default_extension url_field
+    local input_file default_extension
     local temp_file count limit_reached active_count should_wait
-    local id created_at url safe_id result_file
+    local id created_at main_url medium_url thumb_url video_file_url safe_id result_file
+    local candidate_field candidate_url seen_urls
+    local -a candidate_args=()
+    local -a candidate_fields=()
 
     media_collection=$(media_plural "$media")
     output_dir=$media_collection
@@ -1053,12 +1168,12 @@ download_one_media_type() {
         photo)
             input_file=$PHOTO_INPUT_FILE
             default_extension=jpg
-            url_field=main_url
+            candidate_fields=(main_url medium_url thumb_url)
             ;;
         video)
             input_file=$VIDEO_INPUT_FILE
             default_extension=mp4
-            url_field=video_file_url
+            candidate_fields=(video_file_url)
             ;;
         *)
             echo "Error: unsupported media '$media'"
@@ -1069,7 +1184,7 @@ download_one_media_type() {
     mkdir -p "$output_dir"
     temp_file="${TEMP_DIR}/${media}.tsv"
 
-    if ! jq -r --arg collection "$media_collection" --arg url_field "$url_field" '.[$collection][] | [(.id | tostring), (.created_at // ""), (.[$url_field] // "")] | @tsv' "$input_file" > "$temp_file"; then
+    if ! jq -r --arg collection "$media_collection" '.[$collection][] | [(.id | tostring), (.created_at // ""), (.main_url // ""), (.medium_url // ""), (.thumb_url // ""), (.video_file_url // "")] | @tsv' "$input_file" > "$temp_file"; then
         echo "Error: Failed to parse JSON from '$input_file'"
         exit 1
     fi
@@ -1082,7 +1197,7 @@ download_one_media_type() {
 
     echo "Downloading ${media_collection} from $input_file with ${PARALLEL_DOWNLOADS} parallel download(s)..."
 
-    while IFS=$'\t' read -r id created_at url; do
+    while IFS=$'\t' read -r id created_at main_url medium_url thumb_url video_file_url; do
         while :; do
             active_count=${#ACTIVE_PIDS[@]}
             should_wait=0
@@ -1111,14 +1226,38 @@ download_one_media_type() {
             break
         fi
 
-        if [ -z "$url" ]; then
+        candidate_args=()
+        seen_urls=$'\n'
+
+        for candidate_field in "${candidate_fields[@]}"; do
+            case "$candidate_field" in
+                main_url) candidate_url=$main_url ;;
+                medium_url) candidate_url=$medium_url ;;
+                thumb_url) candidate_url=$thumb_url ;;
+                video_file_url) candidate_url=$video_file_url ;;
+                *) candidate_url="" ;;
+            esac
+
+            if [ -z "$candidate_url" ]; then
+                continue
+            fi
+
+            if [[ "$seen_urls" == *$'\n'"$candidate_url"$'\n'* ]]; then
+                continue
+            fi
+
+            candidate_args+=("$candidate_field" "$candidate_url")
+            seen_urls="${seen_urls}${candidate_url}"$'\n'
+        done
+
+        if [ "${#candidate_args[@]}" -eq 0 ]; then
             echo "[SKIP] $id has no download URL."
             continue
         fi
 
         safe_id=$(sanitize_component "$id")
         result_file=$(mktemp "${TEMP_DIR}/${media}-${safe_id}.status.XXXXXX")
-        launch_download_job "$result_file" "$media" "$output_dir" "$default_extension" "$id" "$created_at" "$url_field" "$url"
+        launch_download_job "$result_file" "$media" "$output_dir" "$default_extension" "$id" "$created_at" "${candidate_args[@]}"
     done < "$temp_file"
 
     if [ "${#ACTIVE_PIDS[@]}" -gt 0 ]; then
