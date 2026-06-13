@@ -227,6 +227,7 @@ validate_positive_integer "-P/--parallel" "$PARALLEL_DOWNLOADS" || exit 1
 validate_media_selection "$MEDIA_SELECTION" "-m/--media" || exit 1
 
 TEMP_DIR=$(mktemp -d)
+LOG_LOCK_DIR="${TEMP_DIR}/log.lock"
 CURRENT_DOWNLOAD=""
 
 cleanup() {
@@ -255,6 +256,21 @@ trap 'exit 143' TERM
 
 sanitize_component() {
     printf '%s' "$1" | tr -c '[:alnum:]_.-' '_'
+}
+
+print_parallel_download_error() {
+    local file=$1
+    local id=$2
+
+    while ! mkdir "$LOG_LOCK_DIR" 2>/dev/null; do
+        sleep 0.05
+    done
+
+    if [ -s "$file" ]; then
+        cat "$file"
+    fi
+    echo "[ERROR] Failed to download $id"
+    rmdir "$LOG_LOCK_DIR"
 }
 
 format_created_at() {
@@ -835,7 +851,7 @@ download_media_item() {
     local url=$7
     local safe_id timestamp_fields filename_date touch_stamp setfile_date
     local metadata_stamp iso_stamp timezone_offset_raw timezone_offset
-    local base_name existing_file ext_guess temp_download header_file
+    local base_name existing_file ext_guess temp_download header_file curl_error_file
     local ext filename
 
     safe_id=$(sanitize_component "$id")
@@ -848,6 +864,7 @@ download_media_item() {
     timezone_offset_raw=""
     timezone_offset=""
     temp_download=""
+    curl_error_file=""
 
     if timestamp_fields=$(format_created_at "$created_at"); then
         IFS='|' read -r filename_date touch_stamp setfile_date metadata_stamp iso_stamp timezone_offset_raw <<< "$timestamp_fields"
@@ -868,15 +885,16 @@ download_media_item() {
     temp_download=$(mktemp "${output_dir}/.${safe_id}.${RUN_ID}.download.XXXXXX")
     CURRENT_DOWNLOAD=$temp_download
     header_file=$(mktemp "${TEMP_DIR}/${media}-${safe_id}.headers.XXXXXX")
+    curl_error_file=$(mktemp "${TEMP_DIR}/${media}-${safe_id}.curl-error.XXXXXX")
 
     sleep_with_jitter "$THROTTLE" "$JITTER" "Sleeping for " "s before ${base_name}..."
 
     echo "[DOWNLOADING] ${base_name}..."
     if [ "$PARALLEL_DOWNLOADS" -gt 1 ]; then
-        if curl --fail --silent --show-error -L -D "$header_file" -o "$temp_download" "$url"; then
+        if curl --fail --silent --show-error -L -D "$header_file" -o "$temp_download" "$url" 2>"$curl_error_file"; then
             :
         else
-            echo "[ERROR] Failed to download $id"
+            print_parallel_download_error "$curl_error_file" "$id"
             rm -f "$temp_download"
             CURRENT_DOWNLOAD=""
             printf '1\n' > "$result_file"
