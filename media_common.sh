@@ -22,6 +22,7 @@ DEFAULT_MEDIA_TIMEZONE="America/New_York"
 DEFAULT_CREDENTIALS_FILE="credentials.txt"
 DEFAULT_PHOTO_LIST_FILE="raw_photo_list_response.json"
 DEFAULT_VIDEO_LIST_FILE="raw_video_list_response.json"
+DEFAULT_GEOTAG_FILE="geotag.json"
 
 media_plural() {
     case "$1" in

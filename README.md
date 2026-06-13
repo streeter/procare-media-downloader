@@ -7,6 +7,7 @@ A set of bash scripts to bulk download videos and photos from the Procare parent
 - **curl**: For making HTTP requests
 - **jq**: For JSON parsing (`brew install jq` on macOS)
 - **credentials.txt**: A file containing one Procare Bearer authentication token per line
+- **exiftool**: Optional; writes embedded creation time and GPS metadata when available (`brew install exiftool` on macOS)
 
 ## Setup
 
@@ -25,6 +26,25 @@ printf '%s\n' "school_one_token_here" "school_two_token_here" > credentials.txt
 ```
 
 Anything after `#` on a credential line is treated as a comment.
+
+### Optional Geotagging
+
+If `geotag.json` exists, `download_media.sh` uses it to add the same GPS coordinates to downloaded photos and videos when `exiftool` supports the media format. The real `geotag.json` file is ignored by git. Start from the checked-in example:
+
+```bash
+cp geotag.example.json geotag.json
+```
+
+Then edit `geotag.json`:
+
+```json
+{
+  "lat": 40.7128,
+  "long": -74.0060
+}
+```
+
+The downloader also accepts `latitude`/`longitude` or `lat`/`lng` keys. Use `--geotag-file <file>` to point at a different local JSON file.
 
 ## Usage
 
@@ -71,6 +91,7 @@ Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 | `-j`, `--jitter <seconds>` | Max random jitter added to sleep | 0 |
 | `-p`, `--photo-input <file>` | Photo input JSON file | raw_photo_list_response.json |
 | `-v`, `--video-input <file>` | Video input JSON file | raw_video_list_response.json |
+| `-g`, `--geotag-file <file>` | Optional local GPS JSON file | geotag.json |
 | `-m`, `--media <media>` | Media to download: `all`, `photo`, or `video` | all |
 | `-P`, `--parallel <count>` | Parallel downloads per media type | 16 |
 | `-h`, `--help` | Show usage help | n/a |
@@ -109,6 +130,6 @@ If a download is interrupted, run the script again to continue where you left of
 - Use `-P` or `--parallel` to control concurrent downloads.
 - Shared defaults and validation helpers live in `media_common.sh` so listing and downloading stay in sync.
 - Downloaded filenames use each item's `created_at` value, interpreted as Eastern time, so files sort chronologically by name.
-- When `exiftool` is available, `download_media.sh` writes embedded photo/video creation metadata from `created_at`, interpreted as Eastern time.
+- When `exiftool` is available, `download_media.sh` writes embedded photo/video creation metadata from `created_at`, interpreted as Eastern time. If `geotag.json` exists, it also writes GPS coordinates to media formats that support them.
 - On macOS, `download_media.sh` sets filesystem creation time with `SetFile` when available and always tries to set modified time with `touch`.
 - Some media may be listed but ultimately fail to download because they have already been deleted from the backend. Failed downloads are not moved into `photos/` or `videos/`.

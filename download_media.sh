@@ -11,7 +11,7 @@
 #   - raw_photo_list_response.json and raw_video_list_response.json
 #   - jq: Required for JSON parsing
 #   - curl: Required for downloads
-#   - exiftool: Optional; writes embedded media creation metadata when present
+#   - exiftool: Optional; writes embedded media creation and GPS metadata when present
 #
 # Output:
 #   - photos/YYYY-MM-DD HHMM <photo-id>.<ext>: Downloaded photo files
@@ -25,6 +25,7 @@
 #   -v, --video-input <file>     Video input JSON file (default: raw_video_list_response.json)
 #   -m, --media <media>          Media to download: all, photo, or video (default: all)
 #   -P, --parallel <count>       Parallel downloads per media type (default: 16)
+#   -g, --geotag-file <file>     Optional local GPS JSON file (default: geotag.json)
 #
 # Usage:
 #   ./download_media.sh
@@ -45,23 +46,33 @@ THROTTLE=$DEFAULT_DOWNLOAD_THROTTLE
 JITTER=$DEFAULT_DOWNLOAD_JITTER
 PHOTO_INPUT_FILE=$DEFAULT_PHOTO_LIST_FILE
 VIDEO_INPUT_FILE=$DEFAULT_VIDEO_LIST_FILE
+GEOTAG_FILE=$DEFAULT_GEOTAG_FILE
 MEDIA_SELECTION=$DEFAULT_MEDIA_SELECTION
 PARALLEL_DOWNLOADS=$DEFAULT_PARALLEL_DOWNLOADS
 RUN_ID="download-media-$$"
 MEDIA_TIMEZONE=$DEFAULT_MEDIA_TIMEZONE
 EXIFTOOL_BIN=""
+GEOTAG_ENABLED=0
+GEOTAG_LATITUDE=""
+GEOTAG_LONGITUDE=""
+GEOTAG_LATITUDE_ABS=""
+GEOTAG_LONGITUDE_ABS=""
+GEOTAG_LATITUDE_REF=""
+GEOTAG_LONGITUDE_REF=""
+GEOTAG_ISO6709=""
 ACTIVE_PIDS=()
 ACTIVE_RESULTS=()
 BATCH_DOWNLOADED=0
 FAILED_DOWNLOADS=0
 
 usage() {
-    echo "Usage: $0 [-n|--limit limit] [-t|--throttle throttle_sec] [-j|--jitter jitter_sec] [-p|--photo-input photo_input] [-v|--video-input video_input] [-m|--media all|photo|video] [-P|--parallel parallel]"
+    echo "Usage: $0 [-n|--limit limit] [-t|--throttle throttle_sec] [-j|--jitter jitter_sec] [-p|--photo-input photo_input] [-v|--video-input video_input] [-g|--geotag-file geotag_json] [-m|--media all|photo|video] [-P|--parallel parallel]"
     echo "  -n, --limit: Number of each media type to download (default: $DEFAULT_DOWNLOAD_LIMIT = all)"
     echo "  -t, --throttle: Base sleep time between downloads (default: $DEFAULT_DOWNLOAD_THROTTLE)"
     echo "  -j, --jitter: Max random jitter time added to sleep (default: $DEFAULT_DOWNLOAD_JITTER)"
     echo "  -p, --photo-input: Photo input JSON file (default: $DEFAULT_PHOTO_LIST_FILE)"
     echo "  -v, --video-input: Video input JSON file (default: $DEFAULT_VIDEO_LIST_FILE)"
+    echo "  -g, --geotag-file: Optional local GPS JSON file (default: $DEFAULT_GEOTAG_FILE)"
     echo "  -m, --media: Media to download: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)"
     echo "  -P, --parallel: Parallel downloads per media type (default: $DEFAULT_PARALLEL_DOWNLOADS)"
     echo "  -h, --help: Show this help message"
@@ -126,6 +137,17 @@ while [ "$#" -gt 0 ]; do
         --video-input=*)
             ARGS+=("-v" "${1#*=}")
             ;;
+        --geotag-file)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --geotag-file requires a value"
+                exit 1
+            fi
+            ARGS+=("-g" "$1")
+            ;;
+        --geotag-file=*)
+            ARGS+=("-g" "${1#*=}")
+            ;;
         --media)
             shift
             if [ "$#" -eq 0 ]; then
@@ -169,15 +191,16 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-set -- ${ARGS[@]+"${ARGS[@]}"}
+set -- "${ARGS[@]}"
 
-while getopts "n:t:j:p:v:m:P:h" opt; do
+while getopts "n:t:j:p:v:g:m:P:h" opt; do
     case $opt in
         n) LIMIT=$OPTARG ;;
         t) THROTTLE=$OPTARG ;;
         j) JITTER=$OPTARG ;;
         p) PHOTO_INPUT_FILE=$OPTARG ;;
         v) VIDEO_INPUT_FILE=$OPTARG ;;
+        g) GEOTAG_FILE=$OPTARG ;;
         m) MEDIA_SELECTION=$OPTARG ;;
         P) PARALLEL_DOWNLOADS=$OPTARG ;;
         h) usage 0 ;;
@@ -254,6 +277,95 @@ colonize_timezone_offset() {
     return 1
 }
 
+is_decimal_number() {
+    [[ "$1" =~ ^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
+}
+
+validate_coordinate_range() {
+    local label=$1
+    local value=$2
+    local min=$3
+    local max=$4
+
+    if ! is_decimal_number "$value"; then
+        echo "Error: $label must be a decimal number"
+        return 1
+    fi
+
+    if ! awk -v value="$value" -v min="$min" -v max="$max" 'BEGIN { exit !(value >= min && value <= max) }'; then
+        echo "Error: $label must be between $min and $max"
+        return 1
+    fi
+}
+
+decimal_abs() {
+    awk -v value="$1" 'BEGIN { if (value < 0) value = -value; printf "%.8f", value }'
+}
+
+coordinate_ref() {
+    local value=$1
+    local positive_ref=$2
+    local negative_ref=$3
+
+    if awk -v value="$value" 'BEGIN { exit !(value < 0) }'; then
+        printf '%s' "$negative_ref"
+    else
+        printf '%s' "$positive_ref"
+    fi
+}
+
+format_iso6709_coordinates() {
+    local latitude=$1
+    local longitude=$2
+
+    awk -v latitude="$latitude" -v longitude="$longitude" 'BEGIN { printf "%+010.6f%+011.6f/", latitude, longitude }'
+}
+
+load_geotag_config() {
+    local latitude
+    local longitude
+
+    if [ ! -f "$GEOTAG_FILE" ]; then
+        return 0
+    fi
+
+    if ! jq -e . "$GEOTAG_FILE" >/dev/null 2>&1; then
+        echo "Error: $GEOTAG_FILE is not valid JSON"
+        exit 1
+    fi
+
+    if ! latitude=$(jq -er '(.latitude // .lat // .flat) | select(type == "number" or type == "string")' "$GEOTAG_FILE"); then
+        echo "Error: $GEOTAG_FILE must contain latitude (or lat)"
+        exit 1
+    fi
+
+    if ! longitude=$(jq -er '(.longitude // .long // .lng) | select(type == "number" or type == "string")' "$GEOTAG_FILE"); then
+        echo "Error: $GEOTAG_FILE must contain longitude (or long/lng)"
+        exit 1
+    fi
+
+    latitude=$(trim_whitespace "$latitude")
+    longitude=$(trim_whitespace "$longitude")
+
+    validate_coordinate_range "geotag latitude" "$latitude" -90 90 || exit 1
+    validate_coordinate_range "geotag longitude" "$longitude" -180 180 || exit 1
+
+    GEOTAG_ENABLED=1
+    GEOTAG_LATITUDE=$latitude
+    GEOTAG_LONGITUDE=$longitude
+    GEOTAG_LATITUDE_ABS=$(decimal_abs "$GEOTAG_LATITUDE")
+    GEOTAG_LONGITUDE_ABS=$(decimal_abs "$GEOTAG_LONGITUDE")
+    GEOTAG_LATITUDE_REF=$(coordinate_ref "$GEOTAG_LATITUDE" N S)
+    GEOTAG_LONGITUDE_REF=$(coordinate_ref "$GEOTAG_LONGITUDE" E W)
+    GEOTAG_ISO6709=$(format_iso6709_coordinates "$GEOTAG_LATITUDE" "$GEOTAG_LONGITUDE")
+
+    echo "Using GPS geotag from $GEOTAG_FILE (${GEOTAG_LATITUDE}, ${GEOTAG_LONGITUDE})."
+
+    if [ -z "$EXIFTOOL_BIN" ]; then
+        echo "[WARN] $GEOTAG_FILE exists, but exiftool is not available; GPS metadata will not be written."
+    fi
+}
+
 set_file_times() {
     local file=$1
     local touch_stamp=$2
@@ -274,51 +386,87 @@ set_file_times() {
     fi
 }
 
-set_embedded_media_times() {
+set_embedded_media_metadata() {
     local media=$1
     local file=$2
     local metadata_stamp=$3
     local iso_stamp=$4
     local timezone_offset=$5
     local timestamp_with_offset iso_timestamp_with_offset
+    local -a api_args=()
+    local -a tag_args=()
 
-    if [ -z "$metadata_stamp" ] || [ -z "$timezone_offset" ] || [ -z "$EXIFTOOL_BIN" ]; then
+    if [ -z "$EXIFTOOL_BIN" ]; then
         return 0
     fi
 
-    timestamp_with_offset="${metadata_stamp}${timezone_offset}"
-    iso_timestamp_with_offset="${iso_stamp}${timezone_offset}"
-
     case "$media" in
         photo)
-            if ! "$EXIFTOOL_BIN" -overwrite_original -P -q \
-                "-AllDates=$metadata_stamp" \
-                "-OffsetTime=$timezone_offset" \
-                "-OffsetTimeOriginal=$timezone_offset" \
-                "-OffsetTimeDigitized=$timezone_offset" \
-                "-XMP:CreateDate=$iso_timestamp_with_offset" \
-                "-XMP:ModifyDate=$iso_timestamp_with_offset" \
-                "-XMP:DateCreated=$iso_timestamp_with_offset" \
-                "$file" >/dev/null 2>&1; then
-                echo "[WARN] Unable to set embedded creation time for $file"
+            if [ -n "$metadata_stamp" ] && [ -n "$timezone_offset" ]; then
+                iso_timestamp_with_offset="${iso_stamp}${timezone_offset}"
+                tag_args+=(
+                    "-AllDates=$metadata_stamp"
+                    "-OffsetTime=$timezone_offset"
+                    "-OffsetTimeOriginal=$timezone_offset"
+                    "-OffsetTimeDigitized=$timezone_offset"
+                    "-XMP:CreateDate=$iso_timestamp_with_offset"
+                    "-XMP:ModifyDate=$iso_timestamp_with_offset"
+                    "-XMP:DateCreated=$iso_timestamp_with_offset"
+                )
+            fi
+
+            if [ "$GEOTAG_ENABLED" -eq 1 ]; then
+                tag_args+=(
+                    "-GPSVersionID=2 3 0 0"
+                    "-GPSLatitude=$GEOTAG_LATITUDE_ABS"
+                    "-GPSLatitudeRef=$GEOTAG_LATITUDE_REF"
+                    "-GPSLongitude=$GEOTAG_LONGITUDE_ABS"
+                    "-GPSLongitudeRef=$GEOTAG_LONGITUDE_REF"
+                )
             fi
             ;;
         video)
-            if ! "$EXIFTOOL_BIN" -overwrite_original -P -q -api QuickTimeUTC=1 \
-                "-QuickTime:CreateDate=$timestamp_with_offset" \
-                "-QuickTime:ModifyDate=$timestamp_with_offset" \
-                "-QuickTime:TrackCreateDate=$timestamp_with_offset" \
-                "-QuickTime:TrackModifyDate=$timestamp_with_offset" \
-                "-QuickTime:MediaCreateDate=$timestamp_with_offset" \
-                "-QuickTime:MediaModifyDate=$timestamp_with_offset" \
-                "-Keys:CreationDate=$iso_timestamp_with_offset" \
-                "-XMP:CreateDate=$iso_timestamp_with_offset" \
-                "-XMP:ModifyDate=$iso_timestamp_with_offset" \
-                "$file" >/dev/null 2>&1; then
-                echo "[WARN] Unable to set embedded creation time for $file"
+            api_args+=(-api QuickTimeUTC=1)
+
+            if [ -n "$metadata_stamp" ] && [ -n "$timezone_offset" ]; then
+                timestamp_with_offset="${metadata_stamp}${timezone_offset}"
+                iso_timestamp_with_offset="${iso_stamp}${timezone_offset}"
+                tag_args+=(
+                    "-QuickTime:CreateDate=$timestamp_with_offset"
+                    "-QuickTime:ModifyDate=$timestamp_with_offset"
+                    "-QuickTime:TrackCreateDate=$timestamp_with_offset"
+                    "-QuickTime:TrackModifyDate=$timestamp_with_offset"
+                    "-QuickTime:MediaCreateDate=$timestamp_with_offset"
+                    "-QuickTime:MediaModifyDate=$timestamp_with_offset"
+                    "-Keys:CreationDate=$iso_timestamp_with_offset"
+                    "-XMP:CreateDate=$iso_timestamp_with_offset"
+                    "-XMP:ModifyDate=$iso_timestamp_with_offset"
+                )
+            fi
+
+            if [ "$GEOTAG_ENABLED" -eq 1 ]; then
+                tag_args+=(
+                    "-ItemList:GPSCoordinates=$GEOTAG_ISO6709"
+                    "-Keys:GPSCoordinates=$GEOTAG_ISO6709"
+                    "-UserData:GPSCoordinates=$GEOTAG_ISO6709"
+                )
             fi
             ;;
     esac
+
+    if [ "${#tag_args[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "${#api_args[@]}" -gt 0 ]; then
+        if ! "$EXIFTOOL_BIN" -overwrite_original -P -q "${api_args[@]}" "${tag_args[@]}" "$file" >/dev/null 2>&1; then
+            echo "[WARN] Unable to set embedded metadata for $file"
+        fi
+    else
+        if ! "$EXIFTOOL_BIN" -overwrite_original -P -q "${tag_args[@]}" "$file" >/dev/null 2>&1; then
+            echo "[WARN] Unable to set embedded metadata for $file"
+        fi
+    fi
 }
 
 clean_extension() {
@@ -462,7 +610,7 @@ download_media_item() {
 
     if existing_file=$(find_existing_file "$output_dir" "$base_name"); then
         echo "[SKIP] $existing_file already exists."
-        set_embedded_media_times "$media" "$existing_file" "$metadata_stamp" "$iso_stamp" "$timezone_offset"
+        set_embedded_media_metadata "$media" "$existing_file" "$metadata_stamp" "$iso_stamp" "$timezone_offset"
         set_file_times "$existing_file" "$touch_stamp" "$setfile_date"
         printf '2\n' > "$result_file"
         return 0
@@ -507,7 +655,7 @@ download_media_item() {
     filename="${output_dir}/${base_name}.${ext}"
     mv "$temp_download" "$filename"
     CURRENT_DOWNLOAD=""
-    set_embedded_media_times "$media" "$filename" "$metadata_stamp" "$iso_stamp" "$timezone_offset"
+    set_embedded_media_metadata "$media" "$filename" "$metadata_stamp" "$iso_stamp" "$timezone_offset"
     set_file_times "$filename" "$touch_stamp" "$setfile_date"
     echo "[SUCCESS] Saved to $filename"
     printf '0\n' > "$result_file"
@@ -661,8 +809,10 @@ validate_selected_inputs
 
 EXIFTOOL_BIN=$(command -v exiftool 2>/dev/null || true)
 if [ -z "$EXIFTOOL_BIN" ]; then
-    echo "[WARN] exiftool not found; embedded photo/video creation metadata will not be written."
+    echo "[WARN] exiftool not found; embedded photo/video creation and GPS metadata will not be written."
 fi
+
+load_geotag_config
 
 if should_download_media photo; then
     download_one_media_type photo
