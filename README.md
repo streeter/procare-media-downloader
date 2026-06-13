@@ -92,6 +92,7 @@ Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 | `-p`, `--photo-input <file>` | Photo input JSON file | raw_photo_list_response.json |
 | `-v`, `--video-input <file>` | Video input JSON file | raw_video_list_response.json |
 | `-g`, `--geotag-file <file>` | Optional local GPS JSON file | geotag.json |
+| `-F`, `--failed-downloads-file <file>` | JSONL log for HTTP 403 failures | failed_media_downloads.jsonl |
 | `-m`, `--media <media>` | Media to download: `all`, `photo`, or `video` | all |
 | `-P`, `--parallel <count>` | Parallel downloads per media type | 16 |
 | `-h`, `--help` | Show usage help | n/a |
@@ -104,6 +105,15 @@ Videos are saved to `videos/YYYY-MM-DD HHMM <video-id>.<ext>`.
 ./download_media.sh --media photo # Download photos only
 ./download_media.sh -P 8         # Run up to 8 downloads at a time
 ```
+
+When a download URL returns HTTP 403, the downloader records the media ID, media type, URL field, timestamp, and URL in `failed_media_downloads.jsonl`. After refreshing credentials, ask the list script to re-fetch the months containing those failed IDs and merge any refreshed records back into the normal raw JSON files:
+
+```bash
+./list_media.sh --retry-failed-downloads
+./download_media.sh
+```
+
+Use `--failed-downloads-file <file>` with either script if you want to keep a separate retry log.
 
 ## Resumable Downloads
 
@@ -120,6 +130,7 @@ If a download is interrupted, run the script again to continue where you left of
 |------|-------------|
 | `raw_video_list_response.json` | Video metadata from API |
 | `raw_photo_list_response.json` | Photo metadata from API |
+| `failed_media_downloads.jsonl` | HTTP 403 download failures for retry refresh |
 | `videos/` | Downloaded video files |
 | `photos/` | Downloaded photo files |
 

@@ -25,6 +25,7 @@
 #   ./list_media.sh --start-date 2024-01-15
 #   ./list_media.sh -m photo
 #   ./list_media.sh -m video
+#   ./list_media.sh --retry-failed-downloads
 #   ./list_media.sh -h
 #
 set -euo pipefail
@@ -38,6 +39,8 @@ END_DATE=$DEFAULT_END_DATE
 THROTTLE=$DEFAULT_LIST_THROTTLE
 JITTER=$DEFAULT_LIST_JITTER
 MEDIA_SELECTION=$DEFAULT_MEDIA_SELECTION
+RETRY_FAILED_DOWNLOADS=0
+FAILED_DOWNLOADS_FILE=$DEFAULT_FAILED_DOWNLOADS_FILE
 TEMP_DIRS=()
 
 cleanup() {
@@ -57,7 +60,7 @@ trap cleanup EXIT
 
 usage() {
     cat <<EOF
-Usage: $0 [-s|--start-date YYYY-MM-DD] [-e|--end-date YYYY-MM-DD] [-m|--media all|photo|video] [-t|--throttle throttle_sec] [-j|--jitter jitter_sec] [-h|--help]
+Usage: $0 [-s|--start-date YYYY-MM-DD] [-e|--end-date YYYY-MM-DD] [-m|--media all|photo|video] [-t|--throttle throttle_sec] [-j|--jitter jitter_sec] [-R|--retry-failed-downloads] [-F|--failed-downloads-file file] [-h|--help]
 
 Fetch paginated Procare media lists into JSON files.
 
@@ -67,6 +70,8 @@ Options:
   -m, --media: Media to list: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)
   -t, --throttle: Base sleep time between API calls (default: $DEFAULT_LIST_THROTTLE)
   -j, --jitter: Max random jitter added to sleep (default: $DEFAULT_LIST_JITTER)
+  -R, --retry-failed-downloads: Refresh only media IDs recorded as HTTP 403 download failures
+  -F, --failed-downloads-file: JSONL file created by download_media.sh (default: $DEFAULT_FAILED_DOWNLOADS_FILE)
   -h, --help: Show this help message
 
 Outputs:
@@ -134,6 +139,20 @@ while [ "$#" -gt 0 ]; do
         --jitter=*)
             ARGS+=("-j" "${1#*=}")
             ;;
+        --retry-failed-downloads)
+            ARGS+=("-R")
+            ;;
+        --failed-downloads-file)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --failed-downloads-file requires a value"
+                exit 1
+            fi
+            ARGS+=("-F" "$1")
+            ;;
+        --failed-downloads-file=*)
+            ARGS+=("-F" "${1#*=}")
+            ;;
         --help)
             usage 0
             ;;
@@ -161,13 +180,15 @@ else
     set --
 fi
 
-while getopts "s:e:m:t:j:h" opt; do
+while getopts "s:e:m:t:j:RF:h" opt; do
     case "$opt" in
         s) START_DATE=$OPTARG ;;
         e) END_DATE=$OPTARG ;;
         m) MEDIA_SELECTION=$OPTARG ;;
         t) THROTTLE=$OPTARG ;;
         j) JITTER=$OPTARG ;;
+        R) RETRY_FAILED_DOWNLOADS=1 ;;
+        F) FAILED_DOWNLOADS_FILE=$OPTARG ;;
         h) usage 0 ;;
         *) usage ;;
     esac
@@ -188,6 +209,18 @@ validate_yyyy_mm_dd_date "-e/--end-date" "$END_DATE" || exit 1
 if [ "${START_DATE//-/}" -gt "${END_DATE//-/}" ]; then
     echo "Error: --start-date must be on or before --end-date"
     exit 1
+fi
+
+if [ "$RETRY_FAILED_DOWNLOADS" -eq 1 ]; then
+    if [ ! -f "$FAILED_DOWNLOADS_FILE" ]; then
+        echo "Error: failed downloads file '$FAILED_DOWNLOADS_FILE' not found"
+        exit 1
+    fi
+
+    if ! jq -s . "$FAILED_DOWNLOADS_FILE" >/dev/null 2>&1; then
+        echo "Error: failed downloads file '$FAILED_DOWNLOADS_FILE' is not valid JSONL"
+        exit 1
+    fi
 fi
 
 START_YEAR=${START_DATE%%-*}
@@ -230,6 +263,70 @@ fetch_page() {
       -o "$output_file"
 }
 
+write_failed_retry_filters() {
+    local media_type=$1
+    local ids_file=$2
+    local months_file=$3
+
+    jq -sr --arg media "$media_type" '
+        [.[] | select(.media == $media and (.http_status | tostring) == "403") | .id]
+        | unique
+        | .[]
+    ' "$FAILED_DOWNLOADS_FILE" > "$ids_file"
+
+    jq -sr --arg media "$media_type" '
+        [.[] | select(.media == $media and (.http_status | tostring) == "403") | .created_at[0:7]]
+        | map(select(test("^[0-9]{4}-[0-9]{2}$")))
+        | unique
+        | .[]
+    ' "$FAILED_DOWNLOADS_FILE" > "$months_file"
+}
+
+merge_refreshed_retry_records() {
+    local plural=$1
+    local output_file=$2
+    local ids_file=$3
+    local temp_dir=$4
+    local refreshed_file
+    local merged_file
+    local refreshed_count
+    local page_files
+
+    refreshed_file="${temp_dir}/refreshed_${plural}.json"
+    merged_file="${temp_dir}/merged_${plural}.json"
+    page_files=("$temp_dir"/page_*.json)
+
+    if [ -e "${page_files[0]}" ]; then
+        jq -s --arg key "$plural" --rawfile ids "$ids_file" '
+            ($ids | split("\n") | map(select(length > 0))) as $failed_ids
+            | (map(.[$key] // []) | add // [])
+            | map(select(.id as $id | $failed_ids | index($id)))
+            | unique_by(.id)
+            | {($key): ., total: length}
+        ' "$temp_dir"/page_*.json > "$refreshed_file"
+    else
+        jq -n --arg key "$plural" '{($key): [], total: 0}' > "$refreshed_file"
+    fi
+
+    refreshed_count=$(jq --arg key "$plural" '.[$key] | length' "$refreshed_file")
+    echo "Found $refreshed_count refreshed ${plural} matching recorded 403 failures."
+
+    if [ -f "$output_file" ]; then
+        jq -s --arg key "$plural" '
+            .[0] as $old
+            | .[1] as $new
+            | ($new[$key] // []) as $new_items
+            | ($new_items | map(.id)) as $new_ids
+            | ((($old[$key] // []) | map(select(.id as $id | ($new_ids | index($id) | not)))) + $new_items) as $items
+            | {($key): $items, total: ($items | length)}
+        ' "$output_file" "$refreshed_file" > "$merged_file"
+    else
+        cp "$refreshed_file" "$merged_file"
+    fi
+
+    mv "$merged_file" "$output_file"
+}
+
 list_media_type() {
     local media_type=$1
     local plural
@@ -257,6 +354,10 @@ list_media_type() {
     local current_page_file
     local item_count
     local page_files
+    local retry_ids_file
+    local retry_months_file
+    local retry_failed_count
+    local month_key
 
     plural=$(media_plural "$media_type")
     display_plural=$(media_display_plural "$media_type")
@@ -266,7 +367,28 @@ list_media_type() {
     temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/list_${plural}.XXXXXX")
     TEMP_DIRS+=("$temp_dir")
 
-    echo "Starting ${media_type} list retrieval (month by month)..."
+    if [ "$RETRY_FAILED_DOWNLOADS" -eq 1 ]; then
+        retry_ids_file="${temp_dir}/retry_ids.txt"
+        retry_months_file="${temp_dir}/retry_months.txt"
+        write_failed_retry_filters "$media_type" "$retry_ids_file" "$retry_months_file"
+        retry_failed_count=$(wc -l < "$retry_ids_file" | tr -d '[:space:]')
+
+        if [ "$retry_failed_count" -eq 0 ]; then
+            echo "No recorded HTTP 403 ${plural} failures in $FAILED_DOWNLOADS_FILE."
+            rm -rf "$temp_dir"
+            return
+        fi
+    else
+        retry_ids_file=""
+        retry_months_file=""
+        retry_failed_count=0
+    fi
+
+    if [ "$RETRY_FAILED_DOWNLOADS" -eq 1 ]; then
+        echo "Starting ${media_type} retry refresh for $retry_failed_count recorded HTTP 403 failure(s)..."
+    else
+        echo "Starting ${media_type} list retrieval (month by month)..."
+    fi
     echo "Date range: ${START_DATE} to ${END_DATE}"
     echo "Credentials: ${#AUTH_TOKENS[@]}"
     echo "Throttle: ${THROTTLE}s base + ${JITTER}s max jitter"
@@ -291,6 +413,17 @@ list_media_type() {
             fi
 
             month_padded=$(printf "%02d" "$current_month")
+            month_key="${current_year}-${month_padded}"
+
+            if [ "$RETRY_FAILED_DOWNLOADS" -eq 1 ] && ! grep -qx "$month_key" "$retry_months_file"; then
+                current_month=$((current_month + 1))
+                if [ "$current_month" -gt 12 ]; then
+                    current_month=1
+                    current_year=$((current_year + 1))
+                fi
+                continue
+            fi
+
             last_day=$(get_last_day "$current_year" "$current_month")
             range_start_day=1
             range_end_day=$((10#$last_day))
@@ -372,6 +505,15 @@ list_media_type() {
     echo "Actual ${display_plural} Retrieved: $actual_count"
     echo "Total API Calls:         $total_api_calls"
     echo "-----------------------------------------"
+
+    if [ "$RETRY_FAILED_DOWNLOADS" -eq 1 ]; then
+        echo "Merging refreshed failed records into $output_file..."
+        merge_refreshed_retry_records "$plural" "$output_file" "$retry_ids_file" "$temp_dir"
+        rm -rf "$temp_dir"
+        echo "Done. Refreshed ${media_type} records saved to $output_file"
+        echo ""
+        return
+    fi
 
     echo "Merging results into $output_file..."
 

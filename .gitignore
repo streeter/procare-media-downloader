@@ -14,3 +14,4 @@ tls-captures/
 __pycache__/
 
 .gemini-clipboard/
+failed_media_downloads.jsonl

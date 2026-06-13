@@ -26,6 +26,8 @@
 #   -m, --media <media>          Media to download: all, photo, or video (default: all)
 #   -P, --parallel <count>       Parallel downloads per media type (default: 16)
 #   -g, --geotag-file <file>     Optional local GPS JSON file (default: geotag.json)
+#   -F, --failed-downloads-file <file>
+#                                JSONL file for HTTP 403 failures
 #
 # Usage:
 #   ./download_media.sh
@@ -47,6 +49,7 @@ JITTER=$DEFAULT_DOWNLOAD_JITTER
 PHOTO_INPUT_FILE=$DEFAULT_PHOTO_LIST_FILE
 VIDEO_INPUT_FILE=$DEFAULT_VIDEO_LIST_FILE
 GEOTAG_FILE=$DEFAULT_GEOTAG_FILE
+FAILED_DOWNLOADS_FILE=$DEFAULT_FAILED_DOWNLOADS_FILE
 MEDIA_SELECTION=$DEFAULT_MEDIA_SELECTION
 PARALLEL_DOWNLOADS=$DEFAULT_PARALLEL_DOWNLOADS
 RUN_ID="download-media-$$"
@@ -67,13 +70,14 @@ BATCH_DOWNLOADED=0
 FAILED_DOWNLOADS=0
 
 usage() {
-    echo "Usage: $0 [-n|--limit limit] [-t|--throttle throttle_sec] [-j|--jitter jitter_sec] [-p|--photo-input photo_input] [-v|--video-input video_input] [-g|--geotag-file geotag_json] [-m|--media all|photo|video] [-P|--parallel parallel]"
+    echo "Usage: $0 [-n|--limit limit] [-t|--throttle throttle_sec] [-j|--jitter jitter_sec] [-p|--photo-input photo_input] [-v|--video-input video_input] [-g|--geotag-file geotag_json] [-F|--failed-downloads-file file] [-m|--media all|photo|video] [-P|--parallel parallel]"
     echo "  -n, --limit: Number of each media type to download (default: $DEFAULT_DOWNLOAD_LIMIT = all)"
     echo "  -t, --throttle: Base sleep time between downloads (default: $DEFAULT_DOWNLOAD_THROTTLE)"
     echo "  -j, --jitter: Max random jitter time added to sleep (default: $DEFAULT_DOWNLOAD_JITTER)"
     echo "  -p, --photo-input: Photo input JSON file (default: $DEFAULT_PHOTO_LIST_FILE)"
     echo "  -v, --video-input: Video input JSON file (default: $DEFAULT_VIDEO_LIST_FILE)"
     echo "  -g, --geotag-file: Optional local GPS JSON file (default: $DEFAULT_GEOTAG_FILE)"
+    echo "  -F, --failed-downloads-file: JSONL file for HTTP 403 failures (default: $DEFAULT_FAILED_DOWNLOADS_FILE)"
     echo "  -m, --media: Media to download: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)"
     echo "  -P, --parallel: Parallel downloads per media type (default: $DEFAULT_PARALLEL_DOWNLOADS)"
     echo "  -h, --help: Show this help message"
@@ -149,6 +153,17 @@ while [ "$#" -gt 0 ]; do
         --geotag-file=*)
             ARGS+=("-g" "${1#*=}")
             ;;
+        --failed-downloads-file)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "Error: --failed-downloads-file requires a value"
+                exit 1
+            fi
+            ARGS+=("-F" "$1")
+            ;;
+        --failed-downloads-file=*)
+            ARGS+=("-F" "${1#*=}")
+            ;;
         --media)
             shift
             if [ "$#" -eq 0 ]; then
@@ -198,7 +213,7 @@ else
     set --
 fi
 
-while getopts "n:t:j:p:v:g:m:P:h" opt; do
+while getopts "n:t:j:p:v:g:F:m:P:h" opt; do
     case $opt in
         n) LIMIT=$OPTARG ;;
         t) THROTTLE=$OPTARG ;;
@@ -206,6 +221,7 @@ while getopts "n:t:j:p:v:g:m:P:h" opt; do
         p) PHOTO_INPUT_FILE=$OPTARG ;;
         v) VIDEO_INPUT_FILE=$OPTARG ;;
         g) GEOTAG_FILE=$OPTARG ;;
+        F) FAILED_DOWNLOADS_FILE=$OPTARG ;;
         m) MEDIA_SELECTION=$OPTARG ;;
         P) PARALLEL_DOWNLOADS=$OPTARG ;;
         h) usage 0 ;;
@@ -271,6 +287,46 @@ print_parallel_download_error() {
     fi
     echo "[ERROR] Failed to download $id"
     rmdir "$LOG_LOCK_DIR"
+}
+
+http_status_from_headers() {
+    local headers_file=$1
+
+    awk '/^HTTP\// { status = $2 } END { print status }' "$headers_file"
+}
+
+record_failed_download() {
+    local media=$1
+    local id=$2
+    local created_at=$3
+    local url_field=$4
+    local http_status=$5
+    local url=$6
+    local recorded_at lock_dir
+
+    if [ "$http_status" != 403 ]; then
+        return 0
+    fi
+
+    recorded_at=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+    lock_dir="${FAILED_DOWNLOADS_FILE}.lock"
+
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+        sleep 0.05
+    done
+
+    jq -nc \
+        --arg recorded_at "$recorded_at" \
+        --arg media "$media" \
+        --arg id "$id" \
+        --arg created_at "$created_at" \
+        --arg url_field "$url_field" \
+        --argjson http_status "$http_status" \
+        --arg url "$url" \
+        '{recorded_at: $recorded_at, media: $media, id: $id, created_at: $created_at, url_field: $url_field, http_status: $http_status, url: $url}' \
+        >> "$FAILED_DOWNLOADS_FILE"
+
+    rmdir "$lock_dir"
 }
 
 format_created_at() {
@@ -848,11 +904,12 @@ download_media_item() {
     local default_extension=$4
     local id=$5
     local created_at=$6
-    local url=$7
+    local url_field=$7
+    local url=$8
     local safe_id timestamp_fields filename_date touch_stamp setfile_date
     local metadata_stamp iso_stamp timezone_offset_raw timezone_offset
     local base_name existing_file ext_guess temp_download header_file curl_error_file
-    local ext filename
+    local ext filename http_status
 
     safe_id=$(sanitize_component "$id")
     timestamp_fields=""
@@ -894,6 +951,8 @@ download_media_item() {
         if curl --fail --silent --show-error -L -D "$header_file" -o "$temp_download" "$url" 2>"$curl_error_file"; then
             :
         else
+            http_status=$(http_status_from_headers "$header_file")
+            record_failed_download "$media" "$id" "$created_at" "$url_field" "$http_status" "$url"
             print_parallel_download_error "$curl_error_file" "$id"
             rm -f "$temp_download"
             CURRENT_DOWNLOAD=""
@@ -904,6 +963,8 @@ download_media_item() {
         if curl --fail -# -L -D "$header_file" -o "$temp_download" "$url"; then
             :
         else
+            http_status=$(http_status_from_headers "$header_file")
+            record_failed_download "$media" "$id" "$created_at" "$url_field" "$http_status" "$url"
             echo "[ERROR] Failed to download $id"
             rm -f "$temp_download"
             CURRENT_DOWNLOAD=""
@@ -1057,7 +1118,7 @@ download_one_media_type() {
 
         safe_id=$(sanitize_component "$id")
         result_file=$(mktemp "${TEMP_DIR}/${media}-${safe_id}.status.XXXXXX")
-        launch_download_job "$result_file" "$media" "$output_dir" "$default_extension" "$id" "$created_at" "$url"
+        launch_download_job "$result_file" "$media" "$output_dir" "$default_extension" "$id" "$created_at" "$url_field" "$url"
     done < "$temp_file"
 
     if [ "${#ACTIVE_PIDS[@]}" -gt 0 ]; then
