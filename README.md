@@ -34,14 +34,19 @@ Anything after `#` on a credential line is treated as a comment.
 ./list_media.sh
 ```
 
-This iterates through each credential and each month in the configured date range, fetching all videos and photos and saving the merged results to `raw_video_list_response.json` and `raw_photo_list_response.json`.
+This iterates through each credential and each month in the selected date range, fetching all videos and photos and saving the merged results to `raw_video_list_response.json` and `raw_photo_list_response.json`.
 
 The date range defaults are configured in `media_common.sh`:
 ```bash
-DEFAULT_START_YEAR=2023
-DEFAULT_START_MONTH=1
-DEFAULT_END_YEAR=2026
-DEFAULT_END_MONTH=8
+DEFAULT_START_DATE="2023-01-01"
+DEFAULT_END_DATE="2026-08-31"
+```
+
+Use `-s YYYY-MM-DD` to pass a different start date and `-e YYYY-MM-DD` to pass a different end date:
+
+```bash
+./list_media.sh -s 2024-01-15
+./list_media.sh -s 2024-01-15 -e 2024-12-31
 ```
 
 Use `-m photo` or `-m video` to list only one media type. Use `-h` to show the script help.

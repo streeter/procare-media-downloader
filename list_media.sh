@@ -21,6 +21,7 @@
 #
 # Usage:
 #   ./list_media.sh
+#   ./list_media.sh -s 2024-01-15
 #   ./list_media.sh -m photo
 #   ./list_media.sh -m video
 #   ./list_media.sh -h
@@ -31,10 +32,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=media_common.sh
 . "$SCRIPT_DIR/media_common.sh"
 
-START_YEAR=$DEFAULT_START_YEAR
-START_MONTH=$DEFAULT_START_MONTH
-END_YEAR=$DEFAULT_END_YEAR
-END_MONTH=$DEFAULT_END_MONTH
+START_DATE=$DEFAULT_START_DATE
+END_DATE=$DEFAULT_END_DATE
 THROTTLE=$DEFAULT_LIST_THROTTLE
 JITTER=$DEFAULT_LIST_JITTER
 MEDIA_SELECTION=$DEFAULT_MEDIA_SELECTION
@@ -57,11 +56,13 @@ trap cleanup EXIT
 
 usage() {
     cat <<EOF
-Usage: $0 [-m all|photo|video] [-t throttle_sec] [-j jitter_sec] [-h]
+Usage: $0 [-s YYYY-MM-DD] [-e YYYY-MM-DD] [-m all|photo|video] [-t throttle_sec] [-j jitter_sec] [-h]
 
 Fetch paginated Procare media lists into JSON files.
 
 Options:
+  -s: Start date to list from (default: $DEFAULT_START_DATE)
+  -e: End date to list through (default: $DEFAULT_END_DATE)
   -m: Media to list: all, photo, or video (default: $DEFAULT_MEDIA_SELECTION)
   -t: Base sleep time between API calls (default: $DEFAULT_LIST_THROTTLE)
   -j: Max random jitter added to sleep (default: $DEFAULT_LIST_JITTER)
@@ -74,8 +75,10 @@ EOF
     exit "${1:-1}"
 }
 
-while getopts "m:t:j:h" opt; do
+while getopts "s:e:m:t:j:h" opt; do
     case "$opt" in
+        s) START_DATE=$OPTARG ;;
+        e) END_DATE=$OPTARG ;;
         m) MEDIA_SELECTION=$OPTARG ;;
         t) THROTTLE=$OPTARG ;;
         j) JITTER=$OPTARG ;;
@@ -93,6 +96,23 @@ fi
 validate_media_selection "$MEDIA_SELECTION" "-m" || exit 1
 validate_non_negative_integer "-t" "$THROTTLE" || exit 1
 validate_non_negative_integer "-j" "$JITTER" || exit 1
+validate_yyyy_mm_dd_date "-s" "$START_DATE" || exit 1
+validate_yyyy_mm_dd_date "-e" "$END_DATE" || exit 1
+
+if [ "${START_DATE//-/}" -gt "${END_DATE//-/}" ]; then
+    echo "Error: -s must be on or before -e"
+    exit 1
+fi
+
+START_YEAR=${START_DATE%%-*}
+START_MONTH_DAY=${START_DATE#*-}
+START_MONTH=$((10#${START_MONTH_DAY%%-*}))
+START_DAY=$((10#${START_DATE##*-}))
+END_YEAR=${END_DATE%%-*}
+END_MONTH_DAY=${END_DATE#*-}
+END_MONTH=$((10#${END_MONTH_DAY%%-*}))
+END_DAY=$((10#${END_DATE##*-}))
+
 load_credentials "$DEFAULT_CREDENTIALS_FILE" || exit 1
 
 # Function to get last day of month (macOS compatible)
@@ -140,6 +160,8 @@ list_media_type() {
     local current_month
     local month_padded
     local last_day
+    local range_start_day
+    local range_end_day
     local date_from
     local date_to
     local page
@@ -159,7 +181,7 @@ list_media_type() {
     TEMP_DIRS+=("$temp_dir")
 
     echo "Starting ${media_type} list retrieval (month by month)..."
-    echo "Date range: ${START_YEAR}-$(printf "%02d" "$START_MONTH") to ${END_YEAR}-$(printf "%02d" "$END_MONTH")"
+    echo "Date range: ${START_DATE} to ${END_DATE}"
     echo "Credentials: ${#AUTH_TOKENS[@]}"
     echo "Throttle: ${THROTTLE}s base + ${JITTER}s max jitter"
     echo ""
@@ -184,10 +206,20 @@ list_media_type() {
 
             month_padded=$(printf "%02d" "$current_month")
             last_day=$(get_last_day "$current_year" "$current_month")
-            date_from="${current_year}-${month_padded}-01%2000%3A00"
-            date_to="${current_year}-${month_padded}-${last_day}%2023%3A59"
+            range_start_day=1
+            range_end_day=$((10#$last_day))
 
-            echo "=== Fetching ${current_year}-${month_padded} ${plural} for credential ${credential_number}/${#AUTH_TOKENS[@]} ==="
+            if [ "$current_year" -eq "$START_YEAR" ] && [ "$current_month" -eq "$START_MONTH" ]; then
+                range_start_day=$START_DAY
+            fi
+            if [ "$current_year" -eq "$END_YEAR" ] && [ "$current_month" -eq "$END_MONTH" ]; then
+                range_end_day=$END_DAY
+            fi
+
+            date_from="${current_year}-${month_padded}-$(printf "%02d" "$range_start_day")%2000%3A00"
+            date_to="${current_year}-${month_padded}-$(printf "%02d" "$range_end_day")%2023%3A59"
+
+            echo "=== Fetching ${current_year}-${month_padded} ${plural} (${current_year}-${month_padded}-$(printf "%02d" "$range_start_day") to ${current_year}-${month_padded}-$(printf "%02d" "$range_end_day")) for credential ${credential_number}/${#AUTH_TOKENS[@]} ==="
 
             page=1
             month_count=0

@@ -7,18 +7,16 @@
 DEFAULT_MEDIA_SELECTION=all
 MEDIA_TYPES=(photo video)
 
-DEFAULT_START_YEAR=2023
-DEFAULT_START_MONTH=1
-DEFAULT_END_YEAR=2026
-DEFAULT_END_MONTH=8
+DEFAULT_START_DATE="2023-01-01"
+DEFAULT_END_DATE="2026-08-31"
 
-DEFAULT_LIST_THROTTLE=1
-DEFAULT_LIST_JITTER=2
+DEFAULT_LIST_THROTTLE=0
+DEFAULT_LIST_JITTER=1
 
 DEFAULT_DOWNLOAD_LIMIT=0
 DEFAULT_DOWNLOAD_THROTTLE=0
 DEFAULT_DOWNLOAD_JITTER=0
-DEFAULT_PARALLEL_DOWNLOADS=4
+DEFAULT_PARALLEL_DOWNLOADS=16
 DEFAULT_MEDIA_TIMEZONE="America/New_York"
 
 DEFAULT_CREDENTIALS_FILE="credentials.txt"
@@ -85,6 +83,22 @@ validate_positive_integer() {
 
     if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ]; then
         echo "Error: $label must be a positive integer"
+        return 1
+    fi
+}
+
+validate_yyyy_mm_dd_date() {
+    local label=$1
+    local value=$2
+    local normalized
+
+    if ! [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        echo "Error: $label must use YYYY-MM-DD format"
+        return 1
+    fi
+
+    if ! normalized=$(date -j -f "%Y-%m-%d" "$value" "+%Y-%m-%d" 2>/dev/null) || [ "$normalized" != "$value" ]; then
+        echo "Error: $label must be a valid date"
         return 1
     fi
 }
