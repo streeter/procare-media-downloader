@@ -191,7 +191,11 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-set -- "${ARGS[@]}"
+if [ "${#ARGS[@]}" -gt 0 ]; then
+    set -- "${ARGS[@]}"
+else
+    set --
+fi
 
 while getopts "n:t:j:p:v:g:m:P:h" opt; do
     case $opt in
