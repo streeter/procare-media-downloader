@@ -60,6 +60,7 @@ GEOTAG_LONGITUDE_ABS=""
 GEOTAG_LATITUDE_REF=""
 GEOTAG_LONGITUDE_REF=""
 GEOTAG_ISO6709=""
+GPS_COORDINATE_TOLERANCE="0.000001"
 ACTIVE_PIDS=()
 ACTIVE_RESULTS=()
 BATCH_DOWNLOADED=0
@@ -473,6 +474,251 @@ set_embedded_media_metadata() {
     fi
 }
 
+has_expected_embedded_media_metadata() {
+    local metadata_stamp=$1
+    local timezone_offset=$2
+
+    if [ -n "$metadata_stamp" ] && [ -n "$timezone_offset" ]; then
+        return 0
+    fi
+
+    if [ "$GEOTAG_ENABLED" -eq 1 ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+exif_values_match() {
+    local file=$1
+    local expected=$2
+    local actual
+    shift 2
+
+    if ! actual=$("$EXIFTOOL_BIN" -s3 -f "$@" "$file" 2>/dev/null); then
+        return 1
+    fi
+
+    [ "$actual" = "$expected" ]
+}
+
+numeric_values_close() {
+    local actual=$1
+    local expected=$2
+    local tolerance=$3
+
+    awk -v actual="$actual" -v expected="$expected" -v tolerance="$tolerance" '
+        BEGIN {
+            if (actual !~ /^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)$/ || expected !~ /^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)$/) {
+                exit 1
+            }
+
+            diff = actual - expected
+            if (diff < 0) {
+                diff = -diff
+            }
+
+            exit !(diff <= tolerance)
+        }
+    '
+}
+
+photo_gps_metadata_matches() {
+    local file=$1
+    local values actual_version actual_latitude actual_latitude_ref
+    local actual_longitude actual_longitude_ref
+
+    if ! values=$("$EXIFTOOL_BIN" -s3 -f -n \
+        -GPSVersionID \
+        -GPS:GPSLatitude \
+        -GPS:GPSLatitudeRef \
+        -GPS:GPSLongitude \
+        -GPS:GPSLongitudeRef \
+        "$file" 2>/dev/null); then
+        return 1
+    fi
+
+    actual_version=$(printf '%s\n' "$values" | sed -n '1p')
+    actual_latitude=$(printf '%s\n' "$values" | sed -n '2p')
+    actual_latitude_ref=$(printf '%s\n' "$values" | sed -n '3p')
+    actual_longitude=$(printf '%s\n' "$values" | sed -n '4p')
+    actual_longitude_ref=$(printf '%s\n' "$values" | sed -n '5p')
+
+    [ "$actual_version" = "2 3 0 0" ] || return 1
+    [ "$actual_latitude_ref" = "$GEOTAG_LATITUDE_REF" ] || return 1
+    [ "$actual_longitude_ref" = "$GEOTAG_LONGITUDE_REF" ] || return 1
+
+    numeric_values_close "$actual_latitude" "$GEOTAG_LATITUDE_ABS" "$GPS_COORDINATE_TOLERANCE" || return 1
+    numeric_values_close "$actual_longitude" "$GEOTAG_LONGITUDE_ABS" "$GPS_COORDINATE_TOLERANCE" || return 1
+}
+
+video_gps_line_matches() {
+    local actual=$1
+    local actual_latitude actual_longitude remainder
+
+    [ "$actual" != "-" ] || return 1
+
+    actual_latitude=${actual%% *}
+    remainder=${actual#* }
+    [ "$remainder" != "$actual" ] || return 1
+    actual_longitude=${remainder%% *}
+
+    numeric_values_close "$actual_latitude" "$GEOTAG_LATITUDE" "$GPS_COORDINATE_TOLERANCE" || return 1
+    numeric_values_close "$actual_longitude" "$GEOTAG_LONGITUDE" "$GPS_COORDINATE_TOLERANCE" || return 1
+}
+
+video_gps_metadata_matches() {
+    local file=$1
+    local values item_list_coordinates keys_coordinates user_data_coordinates
+
+    if ! values=$("$EXIFTOOL_BIN" -s3 -f -n \
+        -ItemList:GPSCoordinates \
+        -Keys:GPSCoordinates \
+        -UserData:GPSCoordinates \
+        "$file" 2>/dev/null); then
+        return 1
+    fi
+
+    item_list_coordinates=$(printf '%s\n' "$values" | sed -n '1p')
+    keys_coordinates=$(printf '%s\n' "$values" | sed -n '2p')
+    user_data_coordinates=$(printf '%s\n' "$values" | sed -n '3p')
+
+    video_gps_line_matches "$item_list_coordinates" || return 1
+    video_gps_line_matches "$keys_coordinates" || return 1
+    video_gps_line_matches "$user_data_coordinates" || return 1
+}
+
+photo_embedded_media_metadata_matches() {
+    local file=$1
+    local metadata_stamp=$2
+    local timezone_offset=$3
+    local timestamp_with_offset expected
+
+    if [ -n "$metadata_stamp" ] && [ -n "$timezone_offset" ]; then
+        timestamp_with_offset="${metadata_stamp}${timezone_offset}"
+        expected=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+            "$metadata_stamp" \
+            "$metadata_stamp" \
+            "$metadata_stamp" \
+            "$timezone_offset" \
+            "$timezone_offset" \
+            "$timezone_offset" \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset")
+
+        if ! exif_values_match "$file" "$expected" \
+            -ExifIFD:DateTimeOriginal \
+            -ExifIFD:CreateDate \
+            -IFD0:ModifyDate \
+            -ExifIFD:OffsetTime \
+            -ExifIFD:OffsetTimeOriginal \
+            -ExifIFD:OffsetTimeDigitized \
+            -XMP:CreateDate \
+            -XMP:ModifyDate \
+            -XMP:DateCreated; then
+            return 1
+        fi
+    fi
+
+    if [ "$GEOTAG_ENABLED" -eq 1 ]; then
+        if ! photo_gps_metadata_matches "$file"; then
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+video_embedded_media_metadata_matches() {
+    local file=$1
+    local metadata_stamp=$2
+    local timezone_offset=$3
+    local timestamp_with_offset expected
+
+    if [ -n "$metadata_stamp" ] && [ -n "$timezone_offset" ]; then
+        timestamp_with_offset="${metadata_stamp}${timezone_offset}"
+        expected=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset" \
+            "$timestamp_with_offset")
+
+        if ! exif_values_match "$file" "$expected" -api QuickTimeUTC=1 \
+            -QuickTime:CreateDate \
+            -QuickTime:ModifyDate \
+            -QuickTime:TrackCreateDate \
+            -QuickTime:TrackModifyDate \
+            -QuickTime:MediaCreateDate \
+            -QuickTime:MediaModifyDate \
+            -Keys:CreationDate \
+            -XMP:CreateDate \
+            -XMP:ModifyDate; then
+            return 1
+        fi
+    fi
+
+    if [ "$GEOTAG_ENABLED" -eq 1 ]; then
+        if ! video_gps_metadata_matches "$file"; then
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+embedded_media_metadata_matches() {
+    local media=$1
+    local file=$2
+    local metadata_stamp=$3
+    local timezone_offset=$4
+
+    case "$media" in
+        photo)
+            photo_embedded_media_metadata_matches "$file" "$metadata_stamp" "$timezone_offset"
+            ;;
+        video)
+            video_embedded_media_metadata_matches "$file" "$metadata_stamp" "$timezone_offset"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+verify_or_repair_existing_media_metadata() {
+    local media=$1
+    local file=$2
+    local metadata_stamp=$3
+    local iso_stamp=$4
+    local timezone_offset=$5
+    local touch_stamp=$6
+    local setfile_date=$7
+
+    if [ -z "$EXIFTOOL_BIN" ] || ! has_expected_embedded_media_metadata "$metadata_stamp" "$timezone_offset"; then
+        echo "[SKIP] $file already exists."
+        return 0
+    fi
+
+    if embedded_media_metadata_matches "$media" "$file" "$metadata_stamp" "$timezone_offset"; then
+        echo "[SKIP] $file already exists with expected embedded metadata."
+        return 0
+    fi
+
+    echo "[REPAIR] $file already exists; updating embedded metadata."
+    set_embedded_media_metadata "$media" "$file" "$metadata_stamp" "$iso_stamp" "$timezone_offset"
+    set_file_times "$file" "$touch_stamp" "$setfile_date"
+
+    if ! embedded_media_metadata_matches "$media" "$file" "$metadata_stamp" "$timezone_offset"; then
+        echo "[WARN] Embedded metadata for $file still differs after update."
+    fi
+}
+
 clean_extension() {
     local ext
     ext=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
@@ -613,9 +859,7 @@ download_media_item() {
     base_name="${filename_date} ${safe_id}"
 
     if existing_file=$(find_existing_file "$output_dir" "$base_name"); then
-        echo "[SKIP] $existing_file already exists."
-        set_embedded_media_metadata "$media" "$existing_file" "$metadata_stamp" "$iso_stamp" "$timezone_offset"
-        set_file_times "$existing_file" "$touch_stamp" "$setfile_date"
+        verify_or_repair_existing_media_metadata "$media" "$existing_file" "$metadata_stamp" "$iso_stamp" "$timezone_offset" "$touch_stamp" "$setfile_date"
         printf '2\n' > "$result_file"
         return 0
     fi

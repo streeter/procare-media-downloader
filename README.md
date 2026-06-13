@@ -130,6 +130,6 @@ If a download is interrupted, run the script again to continue where you left of
 - Use `-P` or `--parallel` to control concurrent downloads.
 - Shared defaults and validation helpers live in `media_common.sh` so listing and downloading stay in sync.
 - Downloaded filenames use each item's `created_at` value, interpreted as Eastern time, so files sort chronologically by name.
-- When `exiftool` is available, `download_media.sh` writes embedded photo/video creation metadata from `created_at`, interpreted as Eastern time. If `geotag.json` exists, it also writes GPS coordinates to media formats that support them.
+- When `exiftool` is available, `download_media.sh` writes embedded photo/video creation metadata from `created_at`, interpreted as Eastern time. If `geotag.json` exists, it also writes GPS coordinates to media formats that support them. Existing files are checked first; files with the expected embedded metadata are left untouched, while files with missing or stale metadata are repaired.
 - On macOS, `download_media.sh` sets filesystem creation time with `SetFile` when available and always tries to set modified time with `touch`.
 - Some media may be listed but ultimately fail to download because they have already been deleted from the backend. Failed downloads are not moved into `photos/` or `videos/`.
